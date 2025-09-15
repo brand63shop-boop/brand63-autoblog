@@ -43,7 +43,7 @@ def get_blog_id_by_handle(handle: str):
     created = shopify_post("blogs.json", payload)
     return created["blog"]["id"]
 
-def get_recent_products(limit=12):
+def get_recent_products(limit=50):
     params = {"limit": limit, "order": "created_at desc", "status": "active"}
     data = shopify_get("products.json", params=params)
     products = []
@@ -116,7 +116,7 @@ Return STRICT JSON:
 
     for attempt in range(retries):
         resp = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4.1-mini",
             messages=[
                 {"role": "system", "content": "You are a JSON-only blog generator. Always return JSON, no prose."},
                 {"role": "user", "content": base_prompt}
