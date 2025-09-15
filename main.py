@@ -151,7 +151,7 @@ No prose outside JSON.
     )
     content = resp.choices[0].message.content or ""
 
-    title, html = _parse_title_html(content, topic)
+    title, html = parse_title_html(content, topic)
     if title and html:
         return title, html
 
