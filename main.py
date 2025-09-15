@@ -97,44 +97,76 @@ def build_image_html(p):
 """.format(url=p['url'], img=p['image'], alt=alt, title=p['title']).strip()
 
 def openai_generate(topic, products):
+   import re
+
+def _parse_title_html(raw_text: str, fallback_title: str):
+    # 1) try direct JSON
+    try:
+        obj = json.loads(raw_text)
+        if isinstance(obj, dict) and "title" in obj and "html" in obj:
+            return obj["title"], obj["html"]
+    except Exception:
+        pass
+
+    # 2) try to extract a JSON block from within the text
+    m = re.search(r"\{[\s\S]*\}", raw_text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and "title" in obj and "html" in obj:
+                return obj["title"], obj["html"]
+        except Exception:
+            pass
+
+    # 3) last-resort fallback: treat first line as title, rest as HTML paragraphs
+    lines = [ln.strip() for ln in raw_text.strip().splitlines() if ln.strip()]
+    title = (lines[0] if lines else fallback_title)[:70]
+    body_lines = lines[1:] if len(lines) > 1 else [raw_text]
+    html = "<p>" + "</p><p>".join(body_lines) + "</p>"
+    return title, html
+
+def openai_generate(topic, products):
     product_list_text = "\n".join([f"- {p['title']}: {p['url']}" for p in products])
     prompt = f"""
 You are writing a Shopify blog post to increase organic traffic, search authority, reader interest, and conversions.
 RULES:
 - Only include INTERNAL links (use the provided product URLs).
 - No external links. No placeholders.
-- 600–800 words. Clear headings (H2/H3).
+- 600–800 words. Use clear headings (H2/H3).
 - Friendly, helpful, non-spammy tone.
-- Include a short intro, a few useful sections, and a strong CTA to shop.
-- Naturally weave in the following products as recommendations:
+- Include a short intro, useful sections, and a strong CTA to shop.
+- Weave in these products naturally:
 {product_list_text}
 
-Write a compelling SEO title, and return JSON with exactly these fields:
-- "title": a concise, clickable blog title (60–70 chars)
-- "html": the HTML body only (no title tag), using <h2>, <h3>, <p>, <ul>, etc.
-Do not wrap JSON in backticks.
+Return strictly JSON with two keys only:
+{{"title": "... (60-70 chars)", "html": "<h2>...</h2><p>...</p>"}}
+No prose outside JSON.
 """
-    # OpenAI v1 client
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
+
+    # First attempt
     resp = client.chat.completions.create(
         model="gpt-5",
         messages=[{"role": "user", "content": prompt}],
         max_completion_tokens=1100,
     )
-    content = resp.choices[0].message.content.strip()
-    try:
-        data = json.loads(content)
-    except Exception:
-        # If the model returned plain text, ask it to reformat to JSON once
-        fix_prompt = f"Convert the following to valid JSON with keys 'title' and 'html' only:\n\n{content}"
-        resp2 = client.chat.completions.create(
-            model="gpt-5",
-            messages=[{"role": "user", "content": fix_prompt}],
-            max_completion_tokens=500,
-        )
-        data = json.loads(resp2.choices[0].message.content.strip())
-    return data["title"], data["html"]
+    content = resp.choices[0].message.content or ""
+
+    title, html = _parse_title_html(content, topic)
+    if title and html:
+        return title, html
+
+    # If the model still didn't comply, ask it to convert response to JSON only
+    fix_prompt = f"Convert the following to valid JSON with only keys 'title' and 'html'. Do NOT add any other text:\n\n{content}"
+    resp2 = client.chat.completions.create(
+        model="gpt-5",
+        messages=[{"role": "user", "content": fix_prompt}],
+        max_completion_tokens=400,
+    )
+    content2 = resp2.choices[0].message.content or ""
+    return _parse_title_html(content2, topic)
+
 
 def publish_article(blog_id, title, body_html, featured_image_src=None, featured_image_alt=None):
     article = {
