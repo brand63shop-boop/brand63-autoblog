@@ -57,6 +57,7 @@ def get_recent_products(limit=12):
             "url": f"https://{STORE.replace('.myshopify.com','')}.myshopify.com/products/{p['handle']}",
             "image": first_img,
             "tags": p.get("tags", ""),
+            "vendor": p.get("vendor", ""),
             "body_html": p.get("body_html", "")
         })
     return [p for p in products if p["image"]]
@@ -92,9 +93,9 @@ def enforce_json_output(content, fallback_title):
     except Exception:
         return None, None, None, None, None
 
-def openai_generate(products):
+def openai_generate(products, retries=3):
     product_list_text = "\n".join([f"- {p['title']} ({p['url']})" for p in products])
-    prompt = f"""
+    base_prompt = f"""
 Write a Shopify blog post featuring these products:
 
 {product_list_text}
@@ -112,26 +113,25 @@ Return STRICT JSON:
 """
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-    resp = client.chat.completions.create(
-        model="gpt-5",
-        messages=[{"role": "user", "content": prompt}],
-        max_completion_tokens=1500,
-    )
-    content = resp.choices[0].message.content or ""
-    title, html, tags, excerpt, meta = enforce_json_output(content, products[0]["title"])
 
-    # Retry once if broken
-    if not html:
-        fix_prompt = f"Convert this into valid JSON with keys 'title','html','tags','excerpt','meta':\n\n{content}"
-        resp2 = client.chat.completions.create(
+    for attempt in range(retries):
+        resp = client.chat.completions.create(
             model="gpt-5",
-            messages=[{"role": "user", "content": fix_prompt}],
-            max_completion_tokens=800,
+            messages=[
+                {"role": "system", "content": "You are a JSON-only blog generator. Always return JSON, no prose."},
+                {"role": "user", "content": base_prompt}
+            ],
+            max_completion_tokens=1500,
         )
-        content2 = resp2.choices[0].message.content or ""
-        title, html, tags, excerpt, meta = enforce_json_output(content2, products[0]["title"])
+        content = resp.choices[0].message.content or ""
+        title, html, tags, excerpt, meta = enforce_json_output(content, products[0]["title"])
 
-    return title, html, tags, excerpt, meta
+        if html and excerpt and meta:
+            return title, html, tags, excerpt, meta
+        else:
+            print(f"⚠️ Attempt {attempt+1} failed: bad AI output")
+
+    return None, None, None, None, None
 
 # ===== PUBLISH TO SHOPIFY =====
 def publish_article(blog_id, title, body_html, excerpt="", meta_description="", tags=None, featured_image_src=None, featured_image_alt=None):
@@ -167,13 +167,13 @@ def main():
         raise SystemExit("Missing required env vars.")
 
     blog_id = get_blog_id_by_handle(BLOG_HANDLE)
-    products = get_recent_products(limit=12)
+    products = get_recent_products(limit=60)
     topic, picks = pick_topic_and_products(products, max_count=3)
 
     title, html, tags, excerpt, meta = openai_generate(picks)
 
     if not html:
-        raise RuntimeError("❌ AI failed to generate proper blog post.")
+        raise RuntimeError("❌ AI failed to generate proper blog post after 7 retries.")
 
     image_blocks = "\n".join(build_image_html(p) for p in picks)
     combined_html = f"""{html}
@@ -191,3 +191,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
