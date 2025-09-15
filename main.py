@@ -162,7 +162,7 @@ Return strictly JSON with two keys only:
     resp2 = client.chat.completions.create(
         model="gpt-5",
         messages=[{"role": "user", "content": fix_prompt}],
-        max_completion_tokens=400,
+        max_completion_tokens=700,
     )
     content2 = resp2.choices[0].message.content or ""
     return parse_title_html(content2, topic)
