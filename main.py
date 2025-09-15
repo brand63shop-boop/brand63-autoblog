@@ -1,25 +1,24 @@
 import os, json, random, re, requests
 from openai import OpenAI
 
-# ----------------------------
-# ENV VARS
-# ----------------------------
-STORE = os.getenv("SHOPIFY_STORE_DOMAIN")
+# ===== CONFIG =====
+STORE = os.getenv("SHOPIFY_STORE_DOMAIN")  # e.g., myshop.myshopify.com
 TOKEN = os.getenv("SHOPIFY_ADMIN_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-API_VERSION = "2023-07"
-BLOG_HANDLE = "trendsetter-news"
+API_VERSION = "2023-10"
 AUTHOR_NAME = "Brand63"
+BLOG_HANDLE = "trendsetter-news"
+
+AUTO_PUBLISH = False  # 👈 Set True to auto-publish, False = keep as draft
 
 SESSION = requests.Session()
 SESSION.headers.update({
     "X-Shopify-Access-Token": TOKEN,
     "Content-Type": "application/json",
+    "Accept": "application/json"
 })
 
-# ----------------------------
-# SHOPIFY HELPERS
-# ----------------------------
+# ===== SHOPIFY HELPERS =====
 def shopify_get(path, params=None):
     url = f"https://{STORE}/admin/api/{API_VERSION}/{path}"
     r = SESSION.get(url, params=params, timeout=60)
@@ -63,110 +62,103 @@ def get_recent_products(limit=12):
         })
     return [p for p in products if p["image"]]
 
-# ----------------------------
-# PRODUCT SELECTION (ROTATES)
-# ----------------------------
 def pick_topic_and_products(products, max_count=3):
     if not products:
         raise RuntimeError("No products found with images.")
     picks = random.sample(products, k=min(max_count, len(products)))
-
     seed_keywords = []
     try:
         with open("keywords.csv", "r", encoding="utf-8") as f:
-            seed_keywords = [line.strip() for line in f if line.strip()]
+            for line in f:
+                kw = line.strip()
+                if kw:
+                    seed_keywords.append(kw)
     except FileNotFoundError:
         pass
+    topic_kw = random.choice(seed_keywords) if seed_keywords else picks[0]["title"]
+    return topic_kw, picks
 
-    topic = random.choice(seed_keywords) if seed_keywords else random.choice(products)["title"]
-    return topic, picks
-
-# ----------------------------
-# IMAGE HTML
-# ----------------------------
 def build_image_html(p):
     alt = f"{p['title']} by {AUTHOR_NAME}"
-    return """
+    return f"""
 <figure>
-  <a href="{url}" target="_self" rel="noopener">
-    <img src="{img}" alt="{alt}" loading="lazy" />
+  <a href="{p['url']}" target="_self" rel="noopener">
+    <img src="{p['image']}" alt="{alt}" loading="lazy" />
   </a>
-  <figcaption><a href="{url}" target="_self">Shop {title}</a></figcaption>
+  <figcaption><a href="{p['url']}" target="_self">Shop {p['title']}</a></figcaption>
 </figure>
-""".format(url=p['url'], img=p['image'], alt=alt, title=p['title']).strip()
+""".strip()
 
-# ----------------------------
-# AI PARSING
-# ----------------------------
-def parse_ai_json(raw_text: str, fallback_title: str):
+# ===== OPENAI HELPERS =====
+def parse_title_html(raw_text: str, fallback_title: str):
     try:
         obj = json.loads(raw_text)
-        if all(k in obj for k in ["title", "html"]):
-            return (
-                obj["title"],
-                obj["html"],
-                obj.get("excerpt", ""),
-                obj.get("meta_description", ""),
-                obj.get("tags", []),
-            )
+        if isinstance(obj, dict) and "title" in obj and "html" in obj:
+            return obj["title"], obj["html"], obj.get("tags", ""), obj.get("excerpt", ""), obj.get("meta", "")
     except Exception:
         pass
-
-    # fallback: minimal blog
+    m = re.search(r"\{[\s\S]*\}", raw_text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and "title" in obj and "html" in obj:
+                return obj["title"], obj["html"], obj.get("tags", ""), obj.get("excerpt", ""), obj.get("meta", "")
+        except Exception:
+            pass
     lines = [ln.strip() for ln in raw_text.strip().splitlines() if ln.strip()]
     title = (lines[0] if lines else fallback_title)[:70]
-    html = "<p>" + "</p><p>".join(lines[1:] if len(lines) > 1 else [raw_text]) + "</p>"
-    return title, html, "", "", ["autoblog"]
+    body_lines = lines[1:] if len(lines) > 1 else [raw_text]
+    html = "<p>" + "</p><p>".join(body_lines) + "</p>"
+    return title, html, "", "", ""
 
-# ----------------------------
-# AI BLOG GENERATION
-# ----------------------------
 def openai_generate(topic, products):
     product_list_text = "\n".join([f"- {p['title']}: {p['url']}" for p in products])
     prompt = f"""
-Write a Shopify blog post that increases SEO, traffic, and conversions.
+Write a Shopify blog post about: {topic}
 
-Requirements:
-- Word count: 600–800
-- Use clear <h2>/<h3> headings
-- Friendly, helpful tone (not spammy)
-- Naturally recommend these products (internal links only):
+Rules:
+- Length: 600–800 words
+- Tone: Friendly, helpful, and persuasive
+- Include internal product links below
+- Provide:
+  1. "title" (60–70 chars)
+  2. "html" (blog content with <h2>, <p>, and links)
+  3. "tags" (comma-separated SEO keywords)
+  4. "excerpt" (1–2 sentences summary)
+  5. "meta" (SEO meta description)
+
+Products to include:
 {product_list_text}
 
-Return ONLY valid JSON with these keys:
-{{
-  "title": "SEO-friendly title (60–70 chars)",
-  "html": "<h2>...</h2><p>Full article in HTML here</p>",
-  "excerpt": "1–2 sentence preview (20–30 words)",
-  "meta_description": "SEO meta description (120–160 chars)",
-  "tags": ["keyword1", "keyword2", "keyword3"]
-}}
+Return JSON only:
+{{"title": "...", "html": "...", "tags": "...", "excerpt": "...", "meta": "..." }}
 """
-
     client = OpenAI(api_key=OPENAI_API_KEY)
     resp = client.chat.completions.create(
         model="gpt-5",
         messages=[{"role": "user", "content": prompt}],
-        max_completion_tokens=1100,
+        max_completion_tokens=1200,
     )
-    content = (resp.choices[0].message.content or "").strip()
+    content = resp.choices[0].message.content or ""
+    return parse_title_html(content, topic)
 
-    return parse_ai_json(content, topic)
-
-# ----------------------------
-# PUBLISH BLOG
-# ----------------------------
+# ===== PUBLISH TO SHOPIFY =====
 def publish_article(blog_id, title, body_html, excerpt="", meta_description="", tags=None, featured_image_src=None, featured_image_alt=None):
     article = {
         "article": {
             "title": title,
             "author": AUTHOR_NAME,
-            "tags": ", ".join(tags or ["autoblog"]),
+            "tags": tags or "autoblog, brand63",
             "body_html": body_html,
-            "published": True,
+            "published": AUTO_PUBLISH,
             "excerpt": excerpt,
             "metafields": [
-                {"namespace": "global", "key": "description_tag", "value": meta_description, "type": "string"}
+                {
+                    "namespace": "global",
+                    "key": "description_tag",
+                    "value": meta_description,
+                    "type": "string"
+                }
             ]
         }
     }
@@ -178,9 +170,7 @@ def publish_article(blog_id, title, body_html, excerpt="", meta_description="", 
     created = shopify_post(f"blogs/{blog_id}/articles.json", article)
     return created
 
-# ----------------------------
-# MAIN
-# ----------------------------
+# ===== MAIN =====
 def main():
     if not STORE or not TOKEN or not OPENAI_API_KEY:
         raise SystemExit("Missing required env vars: SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_ACCESS_TOKEN, OPENAI_API_KEY")
@@ -189,11 +179,7 @@ def main():
     products = get_recent_products(limit=12)
     topic, picks = pick_topic_and_products(products, max_count=3)
 
-    title, html, excerpt, meta_description, tags = openai_generate(topic, picks)
-
-    # Debug preview
-    print("🤖 Raw AI Output Preview:")
-    print(html[:500])
+    title, html, tags, excerpt, meta = openai_generate(topic, picks)
 
     image_blocks = "\n".join(build_image_html(p) for p in picks)
     combined_html = f"""{html}
@@ -201,18 +187,14 @@ def main():
 <section>
 {image_blocks}
 </section>
-<p><strong>Want more?</strong> Explore our latest arrivals and limited drops in the {AUTHOR_NAME} shop.</p>
+<p><strong>Want more?</strong> Explore our latest arrivals in the {AUTHOR_NAME} shop.</p>
 """
 
     featured_src = picks[0]["image"] if picks else None
     featured_alt = f"{picks[0]['title']} by {AUTHOR_NAME}" if picks else None
 
-    result = publish_article(blog_id, title, combined_html, excerpt, meta_description, tags, featured_src, featured_alt)
-
-    print("✅ Published:", result["article"]["title"])
-    print("🆔 Article ID:", result["article"]["id"])
-    print("🔗 Handle:   ", result["article"]["handle"])
-    print("📅 Published:", result["article"]["published_at"])
+    result = publish_article(blog_id, title, combined_html, excerpt, meta, tags, featured_src, featured_alt)
+    print("✅ Draft saved (or published if AUTO_PUBLISH=True):", result["article"]["title"])
 
 if __name__ == "__main__":
     main()
