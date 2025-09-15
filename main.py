@@ -97,9 +97,7 @@ def build_image_html(p):
 """.format(url=p['url'], img=p['image'], alt=alt, title=p['title']).strip()
 
 def openai_generate(topic, products):
-   import re
-
-def _parse_title_html(raw_text: str, fallback_title: str):
+ def _parse_title_html(raw_text: str, fallback_title: str):
     # 1) try direct JSON
     try:
         obj = json.loads(raw_text)
