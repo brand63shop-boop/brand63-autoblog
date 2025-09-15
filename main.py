@@ -57,7 +57,6 @@ def get_recent_products(limit=12):
             "url": f"https://{STORE.replace('.myshopify.com','')}.myshopify.com/products/{p['handle']}",
             "image": first_img,
             "tags": p.get("tags", ""),
-            "vendor": p.get("vendor", ""),
             "body_html": p.get("body_html", "")
         })
     return [p for p in products if p["image"]]
