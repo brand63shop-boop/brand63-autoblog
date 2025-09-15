@@ -118,7 +118,7 @@ Do not wrap JSON in backticks.
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
         max_tokens=1200,
@@ -130,7 +130,7 @@ Do not wrap JSON in backticks.
         # If the model returned plain text, ask it to reformat to JSON once
         fix_prompt = f"Convert the following to valid JSON with keys 'title' and 'html' only:\n\n{content}"
         resp2 = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5",
             messages=[{"role": "user", "content": fix_prompt}],
             temperature=0.0,
             max_tokens=500,
