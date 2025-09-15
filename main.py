@@ -120,7 +120,7 @@ Do not wrap JSON in backticks.
     resp = client.chat.completions.create(
         model="gpt-5",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
+        temperature=0.0,
         max_completion_tokens=1200,
     )
     content = resp.choices[0].message.content.strip()
