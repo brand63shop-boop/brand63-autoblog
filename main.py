@@ -158,7 +158,7 @@ def main():
         raise SystemExit("Missing env vars.")
 
     blog_id = get_blog_id_by_handle(BLOG_HANDLE)
-    products = get_recent_products(limit=500)
+    products = get_recent_products(limit=250)
     picks = pick_topic_and_products(products, max_count=3)
 
     title, html, tags, excerpt, meta = openai_generate(picks)
