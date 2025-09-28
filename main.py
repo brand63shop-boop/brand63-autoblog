@@ -9,7 +9,7 @@ API_VERSION = "2023-10"
 AUTHOR_NAME = "Brand63"
 BLOG_HANDLE = "trendsetter-news"
 
-AUTO_PUBLISH = False  # keep drafts until approved
+AUTO_PUBLISH = False  # drafts until approved
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -43,9 +43,21 @@ def get_blog_id_by_handle(handle: str):
     created = shopify_post("blogs.json", payload)
     return created["blog"]["id"]
 
-def get_recent_products(limit=250):
-    params = {"limit": limit, "order": "created_at desc", "status": "active"}
-    data = shopify_get("products.json", params=params)
+def get_all_collections(limit=250):
+    """Fetch all collections from Shopify"""
+    data = shopify_get("custom_collections.json", params={"limit": limit})
+    collections = []
+    for c in data.get("custom_collections", []):
+        collections.append({
+            "id": c["id"],
+            "title": c["title"],
+            "handle": c["handle"]
+        })
+    return collections
+
+def get_products_from_collection(collection_id, limit=20):
+    """Fetch products inside a collection"""
+    data = shopify_get(f"collections/{collection_id}/products.json", params={"limit": limit})
     products = []
     for p in data.get("products", []):
         imgs = p.get("images", [])
@@ -60,33 +72,22 @@ def get_recent_products(limit=250):
         })
     return [p for p in products if p["image"]]
 
-# ===== PRODUCT PICKING WITH KEYWORDS =====
-def pick_topic_and_products(products, max_count=3):
-    # Load keyword list from keywords.csv
-    seed_keywords = []
-    try:
-        with open("keywords.csv", "r", encoding="utf-8") as f:
-            for line in f:
-                kw = line.strip()
-                if kw:
-                    seed_keywords.append(kw)
-    except FileNotFoundError:
-        seed_keywords = ["Streetwear", "Urban Fashion", "New Arrivals"]
+# ===== TOPIC + PRODUCT PICKER =====
+def pick_topic_and_products():
+    collections = get_all_collections()
+    if not collections:
+        raise RuntimeError("⚠️ No collections found in Shopify.")
 
-    topic_kw = random.choice(seed_keywords)
+    chosen = random.choice(collections)  # pick one collection randomly
+    products = get_products_from_collection(chosen["id"], limit=20)
 
-    matches = []
-    for p in products:
-        tags = p.get("tags", "").lower()
-        title = p.get("title", "").lower()
-        if topic_kw.lower() in tags or topic_kw.lower() in title:
-            matches.append(p)
+    if not products:
+        raise RuntimeError(f"⚠️ No products found in collection: {chosen['title']}")
 
-    picks = matches[:max_count] if len(matches) >= max_count else random.sample(products, k=min(max_count, len(products)))
+    picks = random.sample(products, k=min(3, len(products)))
+    return chosen["title"], picks
 
-    return topic_kw, picks
-
-# ===== IMAGE HTML BUILDER =====
+# ===== IMAGE BUILDER =====
 def build_image_html(p):
     alt = f"{p['title']} by {AUTHOR_NAME}"
     return f"""
@@ -108,7 +109,7 @@ def openai_generate(topic, products):
         messages=[
             {"role": "system", "content": "You are a JSON-only Shopify blog generator. Output must be valid JSON."},
             {"role": "user", "content": f"""
-Write a Shopify blog post (600–800 words) about **{topic}**.
+Write a Shopify blog post (600–800 words) about the collection: **{topic}**.
 Weave in these products naturally:
 {product_list_text}
 
@@ -139,17 +140,22 @@ Rules:
     )
 
     obj = json.loads(resp.choices[0].message.content)
+
+    # fallback excerpt if missing
+    excerpt = obj.get("excerpt", "").strip()
+    if not excerpt:
+        excerpt = " ".join(obj["html"].split()[:30]) + "..."
+
     return (
         obj["title"],
         obj["html"],
         obj["tags"],
-        obj["excerpt"],
+        excerpt,
         obj["meta_description"],
     )
 
 # ===== PUBLISH BLOG =====
 def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, featured_image_src=None, featured_image_alt=None):
-    # force tags to always end with " blog"
     cleaned_tags = ",".join([t.strip() + " blog" for t in tags.split(",") if t.strip()])
 
     article = {
@@ -159,8 +165,8 @@ def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, feature
             "tags": cleaned_tags,
             "body_html": body_html,
             "published": AUTO_PUBLISH,
-            "excerpt": excerpt,         # plain text
-            "excerpt_html": f"<p>{excerpt}</p>",  # HTML version
+            "excerpt": excerpt,
+            "excerpt_html": f"<p>{excerpt}</p>",
             "metafields": [
                 {
                     "namespace": "global",
@@ -184,8 +190,7 @@ def main():
         raise SystemExit("Missing env vars.")
 
     blog_id = get_blog_id_by_handle(BLOG_HANDLE)
-    products = get_recent_products(limit=250)
-    topic, picks = pick_topic_and_products(products, max_count=3)
+    topic, picks = pick_topic_and_products()
 
     title, html, tags, excerpt, meta = openai_generate(topic, picks)
 
@@ -203,5 +208,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
