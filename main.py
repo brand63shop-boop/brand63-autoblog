@@ -1,4 +1,4 @@
-import os, json, random, requests
+import os, json, random, requests, re
 from openai import OpenAI
 
 # ===== CONFIG =====
@@ -43,7 +43,7 @@ def get_blog_id_by_handle(handle: str):
     created = shopify_post("blogs.json", payload)
     return created["blog"]["id"]
 
-def get_recent_products(limit=12):
+def get_recent_products(limit=250):
     params = {"limit": limit, "order": "created_at desc", "status": "active"}
     data = shopify_get("products.json", params=params)
     products = []
@@ -65,8 +65,8 @@ def pick_topic_and_products(products, max_count=3):
         raise RuntimeError("No active products with images found.")
     return random.sample(products, k=min(max_count, len(products)))
 
-def build_image_html(p):
-    alt = f"{p['title']} by {AUTHOR_NAME}"
+def build_image_html(p, keyword=""):
+    alt = f"{keyword} – {p['title']} | {AUTHOR_NAME}"
     return f"""
 <figure>
   <a href="{p['url']}" target="_self" rel="noopener">
@@ -76,8 +76,17 @@ def build_image_html(p):
 </figure>
 """.strip()
 
+# ===== KEYWORDS =====
+def load_keywords():
+    try:
+        with open("keywords.csv", "r", encoding="utf-8") as f:
+            kws = [line.strip() for line in f if line.strip()]
+        return kws
+    except FileNotFoundError:
+        return ["streetwear trends", "anime t-shirts", "hoodie styling tips"]
+
 # ===== AI BLOG GENERATION =====
-def openai_generate(products):
+def openai_generate(keyword, products):
     product_list_text = "\n".join([f"- {p['title']} ({p['url']})" for p in products])
     client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -86,14 +95,18 @@ def openai_generate(products):
         messages=[
             {"role": "system", "content": "You are a JSON-only Shopify blog generator. Output must be valid JSON."},
             {"role": "user", "content": f"""
-Write a Shopify blog post (600–800 words) that features these products:
+Write a Shopify blog post (1000–1400 words) for the keyword: "{keyword}".
 
+Products to feature:
 {product_list_text}
 
 Rules:
 - Use <h2>, <h3>, <p> for formatting.
+- Include a short intro, body sections, and strong conclusion.
+- Add an FAQ section with at least 3 questions/answers.
 - Only use internal product links.
-- Return JSON with keys: title, html, tags, excerpt, meta_description.
+- Include these outputs in JSON with keys: 
+  title, html, tags, excerpt, meta_description, faq.
 """}
         ],
         response_format={
@@ -107,23 +120,41 @@ Rules:
                         "html": {"type": "string"},
                         "tags": {"type": "string"},
                         "excerpt": {"type": "string"},
-                        "meta_description": {"type": "string"}
+                        "meta_description": {"type": "string"},
+                        "faq": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "q": {"type": "string"},
+                                    "a": {"type": "string"}
+                                },
+                                "required": ["q","a"]
+                            }
+                        }
                     },
-                    "required": ["title", "html", "tags", "excerpt", "meta_description"]
+                    "required": ["title", "html", "tags", "excerpt", "meta_description", "faq"]
                 }
             }
         },
-        max_completion_tokens=1500,
+        max_completion_tokens=2000,
     )
 
     obj = json.loads(resp.choices[0].message.content)
-    return (
-        obj["title"],
-        obj["html"],
-        obj["tags"],
-        obj["excerpt"],
-        obj["meta_description"],
-    )
+    return obj
+
+# ===== SCHEMA BUILDER =====
+def build_schema(obj, keyword):
+    faq_entries = [{"@type": "Question", "name": qa["q"], "acceptedAnswer": {"@type": "Answer", "text": qa["a"]}} for qa in obj.get("faq",[])]
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": obj["title"],
+        "author": AUTHOR_NAME,
+        "about": keyword,
+        "mainEntity": faq_entries
+    }
+    return f'<script type="application/ld+json">{json.dumps(schema)}</script>'
 
 # ===== PUBLISH BLOG =====
 def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, featured_image_src=None, featured_image_alt=None):
@@ -131,10 +162,10 @@ def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, feature
         "article": {
             "title": title,
             "author": AUTHOR_NAME,
-            "tags": tags,
+            "tags": ",".join(tags.split(",")[:6]),  # cap to 6 tags
             "body_html": body_html,
             "published": AUTO_PUBLISH,
-            "excerpt": excerpt,
+            "summary_html": excerpt,
             "metafields": [
                 {
                     "namespace": "global",
@@ -161,18 +192,25 @@ def main():
     products = get_recent_products(limit=250)
     picks = pick_topic_and_products(products, max_count=3)
 
-    title, html, tags, excerpt, meta = openai_generate(picks)
+    keywords = load_keywords()
+    keyword = random.choice(keywords)
 
-    image_blocks = "\n".join(build_image_html(p) for p in picks)
-    combined_html = f"""{html}
+    obj = openai_generate(keyword, picks)
+
+    # add schema
+    schema_block = build_schema(obj, keyword)
+
+    image_blocks = "\n".join(build_image_html(p, keyword) for p in picks)
+    combined_html = f"""{obj['html']}
 <hr/>
 <section>{image_blocks}</section>
+{schema_block}
 """
 
     featured_src = picks[0]["image"] if picks else None
     featured_alt = picks[0]["title"] if picks else None
 
-    result = publish_article(blog_id, title, combined_html, meta, tags, excerpt, featured_src, featured_alt)
+    result = publish_article(blog_id, obj["title"], combined_html, obj["meta_description"], obj["tags"], obj["excerpt"], featured_src, featured_alt)
     print("✅ Draft saved:", result["article"]["title"])
 
 if __name__ == "__main__":
