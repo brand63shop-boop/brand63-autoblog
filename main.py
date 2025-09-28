@@ -1,4 +1,4 @@
-import os, json, random, requests, re
+import os, json, random, requests
 from openai import OpenAI
 
 # ===== CONFIG =====
@@ -9,7 +9,7 @@ API_VERSION = "2023-10"
 AUTHOR_NAME = "Brand63"
 BLOG_HANDLE = "trendsetter-news"
 
-AUTO_PUBLISH = False  # keep as drafts until approved
+AUTO_PUBLISH = False  # keep drafts until approved
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -60,27 +60,36 @@ def get_recent_products(limit=250):
         })
     return [p for p in products if p["image"]]
 
-# ===== KEYWORD + PRODUCT MATCHING =====
+# ===== PRODUCT PICKING WITH KEYWORDS =====
 def pick_topic_and_products(products, max_count=3):
-    # Load seed keywords
-    keywords = []
+    # Load keyword list from keywords.csv
+    seed_keywords = []
     try:
         with open("keywords.csv", "r", encoding="utf-8") as f:
-            keywords = [kw.strip() for kw in f if kw.strip()]
+            for line in f:
+                kw = line.strip()
+                if kw:
+                    seed_keywords.append(kw)
     except FileNotFoundError:
-        pass
+        seed_keywords = ["Streetwear", "Urban Fashion", "New Arrivals"]
 
-    # Pick random topic keyword
-    topic_kw = random.choice(keywords) if keywords else products[0]["title"]
+    # Pick one keyword for the blog topic
+    topic_kw = random.choice(seed_keywords)
 
-    # Match products with that keyword (title or tags)
-    matched = [p for p in products if topic_kw.lower() in p["title"].lower() or topic_kw.lower() in p["tags"].lower()]
+    # Match products to keyword
+    matches = []
+    for p in products:
+        tags = p.get("tags", "").lower()
+        title = p.get("title", "").lower()
+        if topic_kw.lower() in tags or topic_kw.lower() in title:
+            matches.append(p)
 
-    # Fallback if not enough matches
-    picks = matched if len(matched) >= max_count else random.sample(products, k=min(max_count, len(products)))
+    # Use matches if enough, otherwise random fallback
+    picks = matches[:max_count] if len(matches) >= max_count else random.sample(products, k=min(max_count, len(products)))
 
     return topic_kw, picks
 
+# ===== IMAGE HTML BUILDER =====
 def build_image_html(p):
     alt = f"{p['title']} by {AUTHOR_NAME}"
     return f"""
@@ -102,17 +111,13 @@ def openai_generate(topic, products):
         messages=[
             {"role": "system", "content": "You are a JSON-only Shopify blog generator. Output must be valid JSON."},
             {"role": "user", "content": f"""
-Write a Shopify blog post (600–800 words) optimized for SEO. 
-Main topic: {topic}
-
-Products to feature:
+Write a Shopify blog post (600–800 words) about **{topic}**.
+Weave in these products naturally:
 {product_list_text}
 
 Rules:
-- Use <h2>, <h3>, and <p> for structure.
-- Naturally include keywords like: {topic}
-- Insert product links directly (internal only).
-- Strong intro, helpful sections, clear call-to-action.
+- Use <h2>, <h3>, <p> for formatting.
+- Only use internal product links.
 - Return JSON with keys: title, html, tags, excerpt, meta_description.
 """}
         ],
@@ -197,5 +202,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
