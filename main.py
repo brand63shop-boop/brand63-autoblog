@@ -73,10 +73,8 @@ def pick_topic_and_products(products, max_count=3):
     except FileNotFoundError:
         seed_keywords = ["Streetwear", "Urban Fashion", "New Arrivals"]
 
-    # Pick one keyword for the blog topic
     topic_kw = random.choice(seed_keywords)
 
-    # Match products to keyword
     matches = []
     for p in products:
         tags = p.get("tags", "").lower()
@@ -84,7 +82,6 @@ def pick_topic_and_products(products, max_count=3):
         if topic_kw.lower() in tags or topic_kw.lower() in title:
             matches.append(p)
 
-    # Use matches if enough, otherwise random fallback
     picks = matches[:max_count] if len(matches) >= max_count else random.sample(products, k=min(max_count, len(products)))
 
     return topic_kw, picks
@@ -152,14 +149,18 @@ Rules:
 
 # ===== PUBLISH BLOG =====
 def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, featured_image_src=None, featured_image_alt=None):
+    # force tags to always end with " blog"
+    cleaned_tags = ",".join([t.strip() + " blog" for t in tags.split(",") if t.strip()])
+
     article = {
         "article": {
             "title": title,
             "author": AUTHOR_NAME,
-            "tags": tags,
+            "tags": cleaned_tags,
             "body_html": body_html,
             "published": AUTO_PUBLISH,
-            "excerpt": excerpt,
+            "excerpt": excerpt,         # plain text
+            "excerpt_html": f"<p>{excerpt}</p>",  # HTML version
             "metafields": [
                 {
                     "namespace": "global",
@@ -202,4 +203,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
