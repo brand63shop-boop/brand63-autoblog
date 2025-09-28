@@ -9,7 +9,7 @@ API_VERSION = "2023-10"
 AUTHOR_NAME = "Brand63"
 BLOG_HANDLE = "trendsetter-news"
 
-AUTO_PUBLISH = False  # drafts until approved
+AUTO_PUBLISH = False  # keep as drafts until approved
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -60,13 +60,29 @@ def get_recent_products(limit=250):
         })
     return [p for p in products if p["image"]]
 
+# ===== KEYWORD + PRODUCT MATCHING =====
 def pick_topic_and_products(products, max_count=3):
-    if not products:
-        raise RuntimeError("No active products with images found.")
-    return random.sample(products, k=min(max_count, len(products)))
+    # Load seed keywords
+    keywords = []
+    try:
+        with open("keywords.csv", "r", encoding="utf-8") as f:
+            keywords = [kw.strip() for kw in f if kw.strip()]
+    except FileNotFoundError:
+        pass
 
-def build_image_html(p, keyword=""):
-    alt = f"{keyword} – {p['title']} | {AUTHOR_NAME}"
+    # Pick random topic keyword
+    topic_kw = random.choice(keywords) if keywords else products[0]["title"]
+
+    # Match products with that keyword (title or tags)
+    matched = [p for p in products if topic_kw.lower() in p["title"].lower() or topic_kw.lower() in p["tags"].lower()]
+
+    # Fallback if not enough matches
+    picks = matched if len(matched) >= max_count else random.sample(products, k=min(max_count, len(products)))
+
+    return topic_kw, picks
+
+def build_image_html(p):
+    alt = f"{p['title']} by {AUTHOR_NAME}"
     return f"""
 <figure>
   <a href="{p['url']}" target="_self" rel="noopener">
@@ -76,17 +92,8 @@ def build_image_html(p, keyword=""):
 </figure>
 """.strip()
 
-# ===== KEYWORDS =====
-def load_keywords():
-    try:
-        with open("keywords.csv", "r", encoding="utf-8") as f:
-            kws = [line.strip() for line in f if line.strip()]
-        return kws
-    except FileNotFoundError:
-        return ["streetwear trends", "anime t-shirts", "hoodie styling tips"]
-
 # ===== AI BLOG GENERATION =====
-def openai_generate(keyword, products):
+def openai_generate(topic, products):
     product_list_text = "\n".join([f"- {p['title']} ({p['url']})" for p in products])
     client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -95,18 +102,18 @@ def openai_generate(keyword, products):
         messages=[
             {"role": "system", "content": "You are a JSON-only Shopify blog generator. Output must be valid JSON."},
             {"role": "user", "content": f"""
-Write a Shopify blog post (1000–1400 words) for the keyword: "{keyword}".
+Write a Shopify blog post (600–800 words) optimized for SEO. 
+Main topic: {topic}
 
 Products to feature:
 {product_list_text}
 
 Rules:
-- Use <h2>, <h3>, <p> for formatting.
-- Include a short intro, body sections, and strong conclusion.
-- Add an FAQ section with at least 3 questions/answers.
-- Only use internal product links.
-- Include these outputs in JSON with keys: 
-  title, html, tags, excerpt, meta_description, faq.
+- Use <h2>, <h3>, and <p> for structure.
+- Naturally include keywords like: {topic}
+- Insert product links directly (internal only).
+- Strong intro, helpful sections, clear call-to-action.
+- Return JSON with keys: title, html, tags, excerpt, meta_description.
 """}
         ],
         response_format={
@@ -120,41 +127,23 @@ Rules:
                         "html": {"type": "string"},
                         "tags": {"type": "string"},
                         "excerpt": {"type": "string"},
-                        "meta_description": {"type": "string"},
-                        "faq": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "q": {"type": "string"},
-                                    "a": {"type": "string"}
-                                },
-                                "required": ["q","a"]
-                            }
-                        }
+                        "meta_description": {"type": "string"}
                     },
-                    "required": ["title", "html", "tags", "excerpt", "meta_description", "faq"]
+                    "required": ["title", "html", "tags", "excerpt", "meta_description"]
                 }
             }
         },
-        max_completion_tokens=2000,
+        max_completion_tokens=1500,
     )
 
     obj = json.loads(resp.choices[0].message.content)
-    return obj
-
-# ===== SCHEMA BUILDER =====
-def build_schema(obj, keyword):
-    faq_entries = [{"@type": "Question", "name": qa["q"], "acceptedAnswer": {"@type": "Answer", "text": qa["a"]}} for qa in obj.get("faq",[])]
-    schema = {
-        "@context": "https://schema.org",
-        "@type": "Article",
-        "headline": obj["title"],
-        "author": AUTHOR_NAME,
-        "about": keyword,
-        "mainEntity": faq_entries
-    }
-    return f'<script type="application/ld+json">{json.dumps(schema)}</script>'
+    return (
+        obj["title"],
+        obj["html"],
+        obj["tags"],
+        obj["excerpt"],
+        obj["meta_description"],
+    )
 
 # ===== PUBLISH BLOG =====
 def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, featured_image_src=None, featured_image_alt=None):
@@ -162,10 +151,10 @@ def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, feature
         "article": {
             "title": title,
             "author": AUTHOR_NAME,
-            "tags": ",".join(tags.split(",")[:6]),  # cap to 6 tags
+            "tags": tags,
             "body_html": body_html,
             "published": AUTO_PUBLISH,
-            "summary_html": excerpt,
+            "excerpt": excerpt,
             "metafields": [
                 {
                     "namespace": "global",
@@ -190,27 +179,20 @@ def main():
 
     blog_id = get_blog_id_by_handle(BLOG_HANDLE)
     products = get_recent_products(limit=250)
-    picks = pick_topic_and_products(products, max_count=3)
+    topic, picks = pick_topic_and_products(products, max_count=3)
 
-    keywords = load_keywords()
-    keyword = random.choice(keywords)
+    title, html, tags, excerpt, meta = openai_generate(topic, picks)
 
-    obj = openai_generate(keyword, picks)
-
-    # add schema
-    schema_block = build_schema(obj, keyword)
-
-    image_blocks = "\n".join(build_image_html(p, keyword) for p in picks)
-    combined_html = f"""{obj['html']}
+    image_blocks = "\n".join(build_image_html(p) for p in picks)
+    combined_html = f"""{html}
 <hr/>
 <section>{image_blocks}</section>
-{schema_block}
 """
 
     featured_src = picks[0]["image"] if picks else None
     featured_alt = picks[0]["title"] if picks else None
 
-    result = publish_article(blog_id, obj["title"], combined_html, obj["meta_description"], obj["tags"], obj["excerpt"], featured_src, featured_alt)
+    result = publish_article(blog_id, title, combined_html, meta, tags, excerpt, featured_src, featured_alt)
     print("✅ Draft saved:", result["article"]["title"])
 
 if __name__ == "__main__":
