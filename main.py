@@ -32,6 +32,7 @@ def shopify_post(path, payload):
     return r.json()
 
 def get_blog_id_by_handle(handle: str):
+    """Get blog ID by handle or create it if missing."""
     data = shopify_get("blogs.json")
     blogs = data.get("blogs", [])
     for b in blogs:
@@ -74,11 +75,12 @@ def get_products_from_collection(collection_id, limit=20):
 
 # ===== TOPIC + PRODUCT PICKER =====
 def pick_topic_and_products():
+    """Pick one random collection and sample products from it."""
     collections = get_all_collections()
     if not collections:
         raise RuntimeError("⚠️ No collections found in Shopify.")
 
-    chosen = random.choice(collections)  # pick one collection randomly
+    chosen = random.choice(collections)
     products = get_products_from_collection(chosen["id"], limit=20)
 
     if not products:
@@ -101,6 +103,7 @@ def build_image_html(p):
 
 # ===== AI BLOG GENERATION =====
 def openai_generate(topic, products):
+    """Ask OpenAI to generate a blog post about one collection."""
     product_list_text = "\n".join([f"- {p['title']} ({p['url']})" for p in products])
     client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -115,7 +118,7 @@ Weave in these products naturally:
 
 Rules:
 - Use <h2>, <h3>, <p> for formatting.
-- Only use internal product links.
+- Focus only on products from this collection.
 - Return JSON with keys: title, html, tags, excerpt, meta_description.
 """}
         ],
@@ -142,7 +145,7 @@ Rules:
     obj = json.loads(resp.choices[0].message.content)
 
     # fallback excerpt if missing
-    excerpt = obj.get("excerpt", "").strip()
+    excerpt = (obj.get("excerpt") or "").strip()
     if not excerpt:
         excerpt = " ".join(obj["html"].split()[:30]) + "..."
 
@@ -155,57 +158,53 @@ Rules:
     )
 
 # ===== PUBLISH BLOG =====
-def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt, featured_image_src=None, featured_image_alt=None):
-    cleaned_tags = ",".join([t.strip() + " blog" for t in tags.split(",") if t.strip()])
+def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt,
+                    featured_image_src=None, featured_image_alt=None):
+    """Publish or save a new article safely with clean tags & excerpt."""
+    # --- Safe defaults ---
+    meta_desc = (meta_desc or "").strip()[:300]
+    excerpt = (excerpt or "").strip()[:250]
+    if not excerpt:
+        excerpt = "Read the latest updates and fashion highlights from Brand63."
+
+    # --- Clean tags and append ' blog' ---
+    cleaned_tags = ",".join(
+        [t.strip().replace("#", "").replace("|", "") + " blog"
+         for t in tags.split(",") if t.strip()]
+    )
 
     article = {
         "article": {
-            "title": title,
+            "title": title[:250],
             "author": AUTHOR_NAME,
             "tags": cleaned_tags,
             "body_html": body_html,
             "published": AUTO_PUBLISH,
             "excerpt": excerpt,
-            "excerpt_html": f"<p>{excerpt}</p>",
-            "metafields": [
-                {
-                    "namespace": "global",
-                    "key": "description_tag",
-                    "value": meta_desc,
-                    "type": "single_line_text_field"
-                }
-            ]
+            "excerpt_html": f"<p>{excerpt}</p>"
         }
     }
+
+    # Only include image if available
     if featured_image_src:
         article["article"]["image"] = {
             "src": featured_image_src,
             "alt": featured_image_alt or title
         }
+
     return shopify_post(f"blogs/{blog_id}/articles.json", article)
 
 # ===== MAIN =====
 def main():
+    """Main script to generate and upload one blog post."""
     if not STORE or not TOKEN or not OPENAI_API_KEY:
-        raise SystemExit("Missing env vars.")
+        raise SystemExit("Missing env vars. Check SHOPIFY and OPENAI keys.")
 
     blog_id = get_blog_id_by_handle(BLOG_HANDLE)
     topic, picks = pick_topic_and_products()
 
     title, html, tags, excerpt, meta = openai_generate(topic, picks)
 
-    image_blocks = "\n".join(build_image_html(p) for p in picks)
-    combined_html = f"""{html}
-<hr/>
-<section>{image_blocks}</section>
-"""
+    image_blocks = "\n"._
 
-    featured_src = picks[0]["image"] if picks else None
-    featured_alt = picks[0]["title"] if picks else None
-
-    result = publish_article(blog_id, title, combined_html, meta, tags, excerpt, featured_src, featured_alt)
-    print("✅ Draft saved:", result["article"]["title"])
-
-if __name__ == "__main__":
-    main()
 
