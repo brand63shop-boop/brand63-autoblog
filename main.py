@@ -9,7 +9,7 @@ API_VERSION = "2023-10"
 AUTHOR_NAME = "Brand63"
 BLOG_HANDLE = "trendsetter-news"
 
-AUTO_PUBLISH = False  # drafts until approved
+AUTO_PUBLISH = False  # keep posts hidden (drafts) until approved
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -28,6 +28,9 @@ def shopify_get(path, params=None):
 def shopify_post(path, payload):
     url = f"https://{STORE}/admin/api/{API_VERSION}/{path}"
     r = SESSION.post(url, data=json.dumps(payload), timeout=120)
+    if not r.ok:
+        print("❌ Shopify POST Error:", r.status_code)
+        print("Response Text:", r.text)
     r.raise_for_status()
     return r.json()
 
@@ -45,7 +48,7 @@ def get_blog_id_by_handle(handle: str):
     return created["blog"]["id"]
 
 def get_all_collections(limit=250):
-    """Fetch all collections from Shopify"""
+    """Fetch all collections from Shopify."""
     data = shopify_get("custom_collections.json", params={"limit": limit})
     collections = []
     for c in data.get("custom_collections", []):
@@ -57,7 +60,7 @@ def get_all_collections(limit=250):
     return collections
 
 def get_products_from_collection(collection_id, limit=20):
-    """Fetch products inside a collection"""
+    """Fetch products inside a collection."""
     data = shopify_get(f"collections/{collection_id}/products.json", params={"limit": limit})
     products = []
     for p in data.get("products", []):
@@ -95,116 +98,6 @@ def build_image_html(p):
     return f"""
 <figure>
   <a href="{p['url']}" target="_self" rel="noopener">
-    <img src="{p['image']}" alt="{alt}" loading="lazy" />
-  </a>
-  <figcaption><a href="{p['url']}" target="_self">Shop {p['title']}</a></figcaption>
-</figure>
-""".strip()
-
-# ===== AI BLOG GENERATION =====
-def openai_generate(topic, products):
-    """Ask OpenAI to generate a blog post about one collection."""
-    product_list_text = "\n".join([f"- {p['title']} ({p['url']})" for p in products])
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": "You are a JSON-only Shopify blog generator. Output must be valid JSON."},
-            {"role": "user", "content": f"""
-Write a Shopify blog post (600–800 words) about the collection: **{topic}**.
-Weave in these products naturally:
-{product_list_text}
-
-Rules:
-- Use <h2>, <h3>, <p> for formatting.
-- Focus only on products from this collection.
-- Return JSON with keys: title, html, tags, excerpt, meta_description.
-"""}
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "blog_post",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "html": {"type": "string"},
-                        "tags": {"type": "string"},
-                        "excerpt": {"type": "string"},
-                        "meta_description": {"type": "string"}
-                    },
-                    "required": ["title", "html", "tags", "excerpt", "meta_description"]
-                }
-            }
-        },
-        max_completion_tokens=1500,
-    )
-
-    obj = json.loads(resp.choices[0].message.content)
-
-    # fallback excerpt if missing
-    excerpt = (obj.get("excerpt") or "").strip()
-    if not excerpt:
-        excerpt = " ".join(obj["html"].split()[:30]) + "..."
-
-    return (
-        obj["title"],
-        obj["html"],
-        obj["tags"],
-        excerpt,
-        obj["meta_description"],
-    )
-
-# ===== PUBLISH BLOG =====
-def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt,
-                    featured_image_src=None, featured_image_alt=None):
-    """Publish or save a new article safely with clean tags & excerpt."""
-    # --- Safe defaults ---
-    meta_desc = (meta_desc or "").strip()[:300]
-    excerpt = (excerpt or "").strip()[:250]
-    if not excerpt:
-        excerpt = "Read the latest updates and fashion highlights from Brand63."
-
-    # --- Clean tags and append ' blog' ---
-    cleaned_tags = ",".join(
-        [t.strip().replace("#", "").replace("|", "") + " blog"
-         for t in tags.split(",") if t.strip()]
-    )
-
-    article = {
-        "article": {
-            "title": title[:250],
-            "author": AUTHOR_NAME,
-            "tags": cleaned_tags,
-            "body_html": body_html,
-            "published": AUTO_PUBLISH,
-            "excerpt": excerpt,
-            "excerpt_html": f"<p>{excerpt}</p>"
-        }
-    }
-
-    # Only include image if available
-    if featured_image_src:
-        article["article"]["image"] = {
-            "src": featured_image_src,
-            "alt": featured_image_alt or title
-        }
-
-    return shopify_post(f"blogs/{blog_id}/articles.json", article)
-
-# ===== MAIN =====
-def main():
-    """Main script to generate and upload one blog post."""
-    if not STORE or not TOKEN or not OPENAI_API_KEY:
-        raise SystemExit("Missing env vars. Check SHOPIFY and OPENAI keys.")
-
-    blog_id = get_blog_id_by_handle(BLOG_HANDLE)
-    topic, picks = pick_topic_and_products()
-
-    title, html, tags, excerpt, meta = openai_generate(topic, picks)
-
-    image_blocks = "\n"._
+    <img src="{p['image']}" alt="{alt}" loa
 
 
