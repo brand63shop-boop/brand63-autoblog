@@ -95,9 +95,134 @@ def pick_topic_and_products():
 # ===== IMAGE BUILDER =====
 def build_image_html(p):
     alt = f"{p['title']} by {AUTHOR_NAME}"
-    return f"""
-<figure>
-  <a href="{p['url']}" target="_self" rel="noopener">
-    <img src="{p['image']}" alt="{alt}" loa
+    html = (
+        f"<figure>"
+        f"<a href='{p['url']}' target='_self' rel='noopener'>"
+        f"<img src='{p['image']}' alt='{alt}' loading='lazy' />"
+        f"</a>"
+        f"<figcaption><a href='{p['url']}' target='_self'>Shop {p['title']}</a></figcaption>"
+        f"</figure>"
+    )
+    return html
+
+# ===== AI BLOG GENERATION =====
+def openai_generate(topic, products):
+    """Ask OpenAI to generate a blog post about one collection."""
+    product_list_text = "\n".join([f"- {p['title']} ({p['url']})" for p in products])
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    resp = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "You are a JSON-only Shopify blog generator. Output must be valid JSON."},
+            {"role": "user", "content": f"""
+Write a Shopify blog post (600–800 words) about the collection: **{topic}**.
+Weave in these products naturally:
+{product_list_text}
+
+Rules:
+- Use <h2>, <h3>, <p> for formatting.
+- Focus only on products from this collection.
+- Return JSON with keys: title, html, tags, excerpt, meta_description.
+"""}
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "blog_post",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "html": {"type": "string"},
+                        "tags": {"type": "string"},
+                        "excerpt": {"type": "string"},
+                        "meta_description": {"type": "string"}
+                    },
+                    "required": ["title", "html", "tags", "excerpt", "meta_description"]
+                }
+            }
+        },
+        max_completion_tokens=1500,
+    )
+
+    obj = json.loads(resp.choices[0].message.content)
+
+    # fallback excerpt if missing
+    excerpt = (obj.get("excerpt") or "").strip()
+    if not excerpt:
+        excerpt = " ".join(obj["html"].split()[:30]) + "..."
+
+    return (
+        obj["title"],
+        obj["html"],
+        obj["tags"],
+        excerpt,
+        obj["meta_description"],
+    )
+
+# ===== PUBLISH BLOG =====
+def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt,
+                    featured_image_src=None, featured_image_alt=None):
+    """Publish or save a new article safely with clean tags & excerpt."""
+    meta_desc = (meta_desc or "").strip()[:300]
+    excerpt = (excerpt or "").strip()[:250]
+    if not excerpt:
+        excerpt = "Read the latest updates and fashion highlights from Brand63."
+
+    cleaned_tags = ",".join(
+        [t.strip().replace("#", "").replace("|", "") + " blog"
+         for t in tags.split(",") if t.strip()]
+    )
+
+    article = {
+        "article": {
+            "title": title[:250],
+            "author": AUTHOR_NAME,
+            "tags": cleaned_tags,
+            "body_html": body_html,
+            "published": AUTO_PUBLISH,
+            "excerpt": excerpt,
+            "excerpt_html": f"<p>{excerpt}</p>"
+        }
+    }
+
+    if featured_image_src:
+        article["article"]["image"] = {
+            "src": featured_image_src,
+            "alt": featured_image_alt or title
+        }
+
+    return shopify_post(f"blogs/{blog_id}/articles.json", article)
+
+# ===== MAIN =====
+def main():
+    """Main script to generate and upload one blog post."""
+    if not STORE or not TOKEN or not OPENAI_API_KEY:
+        raise SystemExit("Missing env vars. Check SHOPIFY and OPENAI keys.")
+
+    blog_id = get_blog_id_by_handle(BLOG_HANDLE)
+    topic, picks = pick_topic_and_products()
+
+    title, html, tags, excerpt, meta = openai_generate(topic, picks)
+
+    image_blocks = "\n".join(build_image_html(p) for p in picks)
+    combined_html = f"{html}\n<hr/>\n<section>{image_blocks}</section>"
+
+    featured_src = picks[0]["image"] if picks else None
+    featured_alt = picks[0]["title"] if picks else None
+
+    try:
+        result = publish_article(blog_id, title, combined_html, meta, tags, excerpt, featured_src, featured_alt)
+        print("\n✅ Draft saved successfully:", result["article"]["title"])
+        print("📜 Shopify Response:")
+        print(json.dumps(result, indent=2))
+    except requests.exceptions.HTTPError as e:
+        print("\n❌ Shopify rejected the blog post.")
+        print("Response code:", e.response.status_code)
+        print("Full message:", e.response.text)
+
+if __name__ == "__main__":
+    main()
 
 
