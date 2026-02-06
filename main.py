@@ -1,12 +1,12 @@
 import os, json, random, re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import requests
 from openai import OpenAI
 
 # =========================
-# CONFIG (EDIT IF NEEDED)
+# CONFIG
 # =========================
-STORE = os.getenv("SHOPIFY_STORE_DOMAIN")                 # like brand63.myshopify.com
+STORE = os.getenv("SHOPIFY_STORE_DOMAIN")  # like brand63.myshopify.com
 TOKEN = os.getenv("SHOPIFY_ADMIN_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -14,38 +14,45 @@ API_VERSION = "2023-10"
 AUTHOR_NAME = os.getenv("AUTHOR_NAME", "Brand63")
 BLOG_HANDLE = os.getenv("BLOG_HANDLE", "trendsetter-news")
 
-# Keep drafts hidden until you approve
+# Keep posts hidden (draft) until you approve
 AUTO_PUBLISH = False
 
-# Your public domain (used to build blog URLs for internal linking)
+# Used for product links in the blog
 PUBLIC_DOMAIN = os.getenv("PUBLIC_DOMAIN", "www.brand63.com")
 
-# How many newest products we consider "fresh"
-NEWEST_POOL_SIZE = 500        # pull up to 500 newest active products
-FRESH_SAMPLE_WINDOW = 120     # pick from the newest top 120 to strongly prefer new items
+# How many products to pull from each collection (bigger = more chance to include truly new items)
+PER_COLLECTION_PULL = 200
+
+# How many newest products (combined) we consider for selection
+NEWEST_POOL_SIZE = 300
+
+# Strongly prefer the newest items by sampling only from the top N newest products
+FRESH_SAMPLE_WINDOW = 60
+
+# How many products to feature in each blog post
 PICKS_PER_POST = 3
 
-# How far ahead to start "holiday mode"
-HOLIDAY_LOOKAHEAD_DAYS = 45
-
-# Put your Shopify collection handles here (edit these to match your store)
-# If a handle is wrong, the code will just fall back to newest products.
-SEASON_COLLECTION_HANDLES = {
-    "valentines": [
-        "valentines-day",                 # example handle (edit to yours)
-        "valentines-gifts",               # example handle (edit to yours)
-    ],
-    "black_history": [
-        "black-history-vibe-collection",  # example handle (edit to yours)
-        "black-history-vibe",             # example handle (edit to yours)
-    ],
-    # Optional evergreen collections you want to feature often:
-    "evergreen_priority": [
-        "top-new-arrivals",               # example handle (edit to yours)
-        "womens-urban-style",             # example handle (edit to yours)
-        "mens-urban-style",               # example handle (edit to yours)
-    ],
-}
+# ✅ Edit these handles to match YOUR store’s collection handles exactly.
+# You can include as many as you want.
+PRIORITY_COLLECTION_HANDLES = [
+    "new-arrivals-customized-apparel-and-gifts",
+    "mens-clothing-brands",
+    "womens-clothing-sale",
+    "anime-apparel-gifts-anime-and-manga-japan-sale",
+    "nj-wear-2008",
+    "faith-based-clothing-and-gifts",
+    "specialty-coffee-mugs",
+    "boys-apparel-and-gift-sale",
+    "girls-clothing-sale"',
+    "custom-infant-clothing-accessories",
+    "hoodie-sale-best-deals-fave-styles",
+    "purses-bags-and-totes",
+    "clearance-sale-shop-up-to-90-off",
+    "bts",
+    "create-your-own-featured",
+    "hungry-by-design",
+    "black-girl-mug-collection",
+]
 
 # =========================
 # HTTP SESSION
@@ -84,17 +91,16 @@ def get_blog_id_by_handle(handle: str):
     for b in blogs:
         if b.get("handle") == handle:
             return b.get("id")
-    if blogs:
-        return blogs[0].get("id")
+    # If blog doesn't exist, create it
     payload = {"blog": {"title": handle.replace("-", " ").title(), "handle": handle}}
     created = shopify_post("blogs.json", payload)
     return created["blog"]["id"]
 
 def get_all_collections(limit=250):
-    """Get both custom + smart collections so we don't miss anything."""
+    """Fetch both custom + smart collections so handles can be found reliably."""
     collections = []
 
-    # custom collections
+    # Custom collections
     try:
         data = shopify_get("custom_collections.json", params={"limit": limit})
         for c in data.get("custom_collections", []):
@@ -102,7 +108,7 @@ def get_all_collections(limit=250):
     except Exception:
         pass
 
-    # smart collections
+    # Smart collections
     try:
         data = shopify_get("smart_collections.json", params={"limit": limit})
         for c in data.get("smart_collections", []):
@@ -110,7 +116,7 @@ def get_all_collections(limit=250):
     except Exception:
         pass
 
-    # de-dup by handle
+    # Deduplicate by handle
     seen = set()
     unique = []
     for c in collections:
@@ -124,179 +130,84 @@ def get_collection_by_handle(handle: str):
     handle = (handle or "").strip().lower()
     if not handle:
         return None
-    collections = get_all_collections(limit=250)
-    for c in collections:
+    for c in get_all_collections(limit=250):
         if (c.get("handle") or "").strip().lower() == handle:
             return c
     return None
 
-def get_products_from_collection(collection_id, limit=250):
-    data = shopify_get(f"collections/{collection_id}/products.json", params={"limit": limit})
-    products = []
-    for p in data.get("products", []):
-        if p.get("status") and str(p.get("status")).lower() != "active":
-            continue
-        imgs = p.get("images", [])
-        first_img = imgs[0]["src"] if imgs else None
-        if not first_img:
-            continue
-        products.append({
-            "id": p["id"],
-            "title": p["title"],
-            "handle": p["handle"],
-            "created_at": p.get("created_at", ""),
-            "url": f"https://{PUBLIC_DOMAIN}/products/{p['handle']}",
-            "image": first_img,
-            "tags": p.get("tags", ""),
-            "vendor": p.get("vendor", "")
-        })
-    return products
+def parse_created_at(p):
+    # Shopify created_at is ISO-8601; lex sort works, but we'll parse to be safe
+    s = p.get("created_at") or ""
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return datetime.min
 
-def get_newest_active_products(limit=500):
-    """Get newest active products store-wide (this is the main freshness fix)."""
-    # Shopify caps to 250 per request
-    take = min(250, limit)
-    params = {"limit": take, "order": "created_at desc", "status": "active"}
-    data = shopify_get("products.json", params=params)
-
+def get_products_from_collection(collection_id, limit=200):
+    """Fetch products inside a collection, keep only active with at least 1 image."""
+    # Shopify endpoint returns products but not always "status"; we keep image-required and assume collection is online-facing.
+    data = shopify_get(f"collections/{collection_id}/products.json", params={"limit": min(250, limit)})
     products = []
     for p in data.get("products", []):
         imgs = p.get("images", [])
         first_img = imgs[0]["src"] if imgs else None
         if not first_img:
             continue
+
+        # Build public product URL
+        handle = p.get("handle") or ""
         products.append({
-            "id": p["id"],
-            "title": p["title"],
-            "handle": p["handle"],
+            "id": p.get("id"),
+            "title": p.get("title", ""),
+            "handle": handle,
             "created_at": p.get("created_at", ""),
-            "url": f"https://{PUBLIC_DOMAIN}/products/{p['handle']}",
+            "url": f"https://{PUBLIC_DOMAIN}/products/{handle}",
             "image": first_img,
-            "tags": p.get("tags", ""),
-            "vendor": p.get("vendor", "")
+            "tags": p.get("tags", "") or "",
+            "vendor": p.get("vendor", "") or ""
         })
     return products
 
-def get_recent_blog_posts(blog_id, limit=8):
-    """Used for interlinking (internal blog links)."""
-    data = shopify_get(f"blogs/{blog_id}/articles.json", params={"limit": limit})
-    posts = []
-    for a in data.get("articles", []):
-        handle = a.get("handle")
-        title = a.get("title")
-        if handle and title:
-            posts.append({
-                "title": title,
-                "url": f"https://{PUBLIC_DOMAIN}/blogs/{BLOG_HANDLE}/{handle}"
-            })
-    return posts
+def get_newest_products_from_priority_collections():
+    """Pull from your priority collections, combine, sort by newest, and return a newest pool."""
+    combined = []
+    found_any_collection = False
 
-# =========================
-# DATE + HOLIDAY LOGIC
-# =========================
-def now_pacific():
-    # America/Los_Angeles is UTC-8 in winter (Jan), UTC-7 in summer.
-    # We'll approximate using local runner time in UTC and shift -8.
-    return datetime.now(timezone.utc) + timedelta(hours=-8)
+    for handle in PRIORITY_COLLECTION_HANDLES:
+        c = get_collection_by_handle(handle)
+        if not c:
+            print(f"⚠️ Collection handle not found in Shopify: {handle}")
+            continue
 
-def within_days(target_date: datetime, days: int) -> bool:
-    n = now_pacific().date()
-    t = target_date.date()
-    return 0 <= (t - n).days <= days
+        found_any_collection = True
+        items = get_products_from_collection(c["id"], limit=PER_COLLECTION_PULL)
+        if items:
+            combined.extend(items)
+        else:
+            print(f"⚠️ No products (with images) found in collection: {handle}")
 
-def get_season_mode():
-    """
-    Returns one of: 'black_history', 'valentines', or None.
-    Priority:
-      - Black History Month (Feb) takes priority
-      - Late Jan can start Black History mode (ahead of Feb 1)
-      - Valentines starts within lookahead window
-    """
-    n = now_pacific()
-    year = n.year
+    if not found_any_collection:
+        raise RuntimeError("No priority collections were found. Update PRIORITY_COLLECTION_HANDLES to match your store.")
 
-    # Black History Month: all February, plus "ramp up" last 15 days of January
-    feb_1 = datetime(year, 2, 1, tzinfo=timezone.utc) + timedelta(hours=-8)
-    if n.month == 2 or (n.month == 1 and (feb_1.date() - n.date()).days <= 15):
-        return "black_history"
+    # Deduplicate products by id
+    uniq = {}
+    for p in combined:
+        pid = p.get("id")
+        if pid and pid not in uniq:
+            uniq[pid] = p
 
-    # Valentines: within lookahead window before Feb 14
-    vday = datetime(year, 2, 14, tzinfo=timezone.utc) + timedelta(hours=-8)
-    if within_days(vday, HOLIDAY_LOOKAHEAD_DAYS):
-        return "valentines"
+    combined = list(uniq.values())
+    combined.sort(key=parse_created_at, reverse=True)
 
-    return None
+    # Return the newest pool
+    return combined[:min(NEWEST_POOL_SIZE, len(combined))]
 
-# =========================
-# PICK TOPIC + PRODUCTS (NEW LOGIC)
-# =========================
-def sort_newest(products):
-    # created_at is ISO string; sorting descending keeps newest first
-    return sorted(products, key=lambda x: x.get("created_at", ""), reverse=True)
-
-def choose_products_fresh(products, k=3):
+def choose_fresh_products(products, k=3):
     if not products:
-        raise RuntimeError("No active products with images found.")
-    products = sort_newest(products)
+        raise RuntimeError("No usable products found in your selected collections.")
     window = products[:min(FRESH_SAMPLE_WINDOW, len(products))]
     return random.sample(window, k=min(k, len(window)))
 
-def pick_topic_and_products(blog_id):
-    """
-    BEST logic:
-      1) If in holiday mode AND you have holiday collections listed, pull from those collections.
-      2) Else, strongly prefer newest products store-wide.
-      3) Add internal blog links list for the AI to link to (interlinking).
-    """
-    season = get_season_mode()
-
-    seasonal_products = []
-    chosen_topic = None
-
-    # 1) Try seasonal collections first if we’re in season
-    if season and SEASON_COLLECTION_HANDLES.get(season):
-        handles = SEASON_COLLECTION_HANDLES.get(season, [])
-        for h in handles:
-            c = get_collection_by_handle(h)
-            if c:
-                seasonal_products.extend(get_products_from_collection(c["id"], limit=250))
-
-        seasonal_products = sort_newest(seasonal_products)
-
-        if seasonal_products:
-            chosen_topic = "Black History Vibe Collection" if season == "black_history" else "Valentine’s Day Style & Gifts"
-            picks = choose_products_fresh(seasonal_products, k=PICKS_PER_POST)
-            recent_posts = get_recent_blog_posts(blog_id, limit=8)
-            return chosen_topic, picks, season, recent_posts
-
-    # 2) Otherwise: newest products store-wide (this is the main freshness fix)
-    newest = get_newest_active_products(limit=NEWEST_POOL_SIZE)
-    newest = sort_newest(newest)
-
-    if newest:
-        chosen_topic = "Top New Arrivals"  # generic but accurate
-        picks = choose_products_fresh(newest, k=PICKS_PER_POST)
-        recent_posts = get_recent_blog_posts(blog_id, limit=8)
-        return chosen_topic, picks, season, recent_posts
-
-    # 3) Last resort: any collection at all
-    collections = get_all_collections(limit=250)
-    if not collections:
-        raise RuntimeError("⚠️ No collections found in Shopify.")
-
-    chosen = random.choice(collections)
-    products = get_products_from_collection(chosen["id"], limit=250)
-    if not products:
-        raise RuntimeError(f"⚠️ No products found in collection: {chosen['title']}")
-
-    chosen_topic = chosen["title"]
-    picks = choose_products_fresh(products, k=PICKS_PER_POST)
-    recent_posts = get_recent_blog_posts(blog_id, limit=8)
-    return chosen_topic, picks, season, recent_posts
-
-# =========================
-# HTML BUILDERS
-# =========================
 def build_image_html(p):
     alt = f"{p['title']} by {AUTHOR_NAME}"
     return (
@@ -314,22 +225,10 @@ def strip_tags(html):
 # =========================
 # AI BLOG GENERATION
 # =========================
-def openai_generate(topic, products, season_mode, recent_blog_posts):
+def openai_generate(topic, products):
     product_list_text = "\n".join([f"- {p['title']} ({p['url']})" for p in products])
 
-    blog_link_text = ""
-    if recent_blog_posts:
-        # Give AI a few internal blog links for interlinking
-        blog_link_text = "\n".join([f"- {b['title']}: {b['url']}" for b in recent_blog_posts[:6]])
-
-    season_note = ""
-    if season_mode == "black_history":
-        season_note = "Season context: Black History Month content. Keep it respectful, empowering, culture-forward, and product-relevant."
-    elif season_mode == "valentines":
-        season_note = "Season context: Valentine’s Day content. Keep it giftable, fun, and conversion-focused."
-
     client = OpenAI(api_key=OPENAI_API_KEY)
-
     resp = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
@@ -337,20 +236,17 @@ def openai_generate(topic, products, season_mode, recent_blog_posts):
             {"role": "user", "content": f"""
 Write a Shopify blog post (800–1100 words) to increase organic traffic, interest, and conversions for Brand63.com.
 
-Topic/Collection focus: "{topic}"
-{season_note}
+Focus: NEWEST products and what's trending right now.
+Topic anchor: "{topic}"
 
 Products to feature (ONLY internal links, only these product URLs):
 {product_list_text}
 
-Internal blog posts you can link to (optional, but include 1–2 of these if they fit naturally):
-{blog_link_text}
-
 Rules:
 - Use <h2>, <h3>, <p>, <ul><li> HTML formatting.
 - No external links. No placeholders.
-- Add a strong call-to-action section at the end.
 - Make the title match the products you were given.
+- Include practical style/use ideas, gift angles, and a strong call-to-action at the end.
 - Return JSON with keys: title, html, tags, excerpt, meta_description.
 - tags should be comma-separated words/phrases (we will add " blog" automatically).
 """}
@@ -377,14 +273,12 @@ Rules:
 
     obj = json.loads(resp.choices[0].message.content)
 
-    # Fallback excerpt if missing
     excerpt = (obj.get("excerpt") or "").strip()
     if not excerpt:
         excerpt = strip_tags(obj.get("html", ""))[:200].strip()
         if not excerpt:
-            excerpt = "Fresh drops, style tips, and curated picks from Brand63."
+            excerpt = "Fresh drops and curated picks from Brand63."
 
-    # Keep meta description safe length
     meta = (obj.get("meta_description") or "").strip()
     if not meta:
         meta = excerpt
@@ -397,18 +291,18 @@ Rules:
 # =========================
 def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt,
                     featured_image_src=None, featured_image_alt=None):
+
     meta_desc = (meta_desc or "").strip()[:300]
     excerpt = (excerpt or "").strip()[:250]
     if not excerpt:
-        excerpt = "Fresh drops, style tips, and curated picks from Brand63."
+        excerpt = "Fresh drops and curated picks from Brand63."
 
-    # Clean tags and append " blog"
     cleaned_tags = ",".join(
         [t.strip().replace("#", "").replace("|", "") + " blog"
          for t in (tags or "").split(",") if t.strip()]
     )
     if not cleaned_tags:
-        cleaned_tags = "brand63 blog, style blog, new arrivals blog"
+        cleaned_tags = "brand63 blog, new arrivals blog, streetwear blog"
 
     article = {
         "article": {
@@ -419,6 +313,14 @@ def publish_article(blog_id, title, body_html, meta_desc, tags, excerpt,
             "published": AUTO_PUBLISH,
             "excerpt": excerpt,
             "excerpt_html": f"<p>{excerpt}</p>",
+            "metafields": [
+                {
+                    "namespace": "global",
+                    "key": "description_tag",
+                    "value": meta_desc,
+                    "type": "single_line_text_field"
+                }
+            ]
         }
     }
 
@@ -439,11 +341,14 @@ def main():
 
     blog_id = get_blog_id_by_handle(BLOG_HANDLE)
 
-    topic, picks, season_mode, recent_posts = pick_topic_and_products(blog_id)
+    newest_pool = get_newest_products_from_priority_collections()
+    picks = choose_fresh_products(newest_pool, k=PICKS_PER_POST)
 
-    title, html, tags, excerpt, meta = openai_generate(topic, picks, season_mode, recent_posts)
+    # Topic should match what's actually selected
+    topic = "Fresh Drops and New Arrivals"
 
-    # Add image blocks at bottom
+    title, html, tags, excerpt, meta = openai_generate(topic, picks)
+
     image_blocks = "\n".join(build_image_html(p) for p in picks)
     combined_html = f"{html}\n<hr/>\n<section>{image_blocks}</section>"
 
@@ -453,12 +358,11 @@ def main():
     try:
         result = publish_article(blog_id, title, combined_html, meta, tags, excerpt, featured_src, featured_alt)
         print("\n✅ Draft saved successfully:", result["article"]["title"])
-        print("📜 Shopify Response:")
-        print(json.dumps(result, indent=2))
-        print("\n🧠 Season mode:", season_mode)
         print("🆕 Picked products:")
         for p in picks:
             print("-", p["title"], "|", p["url"])
+        print("📜 Shopify Response:")
+        print(json.dumps(result, indent=2))
     except requests.exceptions.HTTPError as e:
         print("\n❌ Shopify rejected the blog post.")
         print("Response code:", e.response.status_code)
