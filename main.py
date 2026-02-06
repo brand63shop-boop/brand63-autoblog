@@ -43,7 +43,7 @@ PRIORITY_COLLECTION_HANDLES = [
     "faith-based-clothing-and-gifts",
     "specialty-coffee-mugs",
     "boys-apparel-and-gift-sale",
-    "girls-clothing-sale"',
+    "girls-clothing-sale",
     "custom-infant-clothing-accessories",
     "hoodie-sale-best-deals-fave-styles",
     "purses-bags-and-totes",
