@@ -226,6 +226,43 @@ def pick_topic_and_products():
 
     return keyword, collection["title"], collection["handle"], collection_url, picks
 
+# ===== HTML CLEANUP =====
+def remove_bad_marketing_language(html):
+    replacements = {
+        "Buyer Intent:": "Why Shoppers Love These Finds:",
+        "Buyer Intent": "Why Shoppers Love These Finds",
+        "The Brand63 Authority:": "Why Shop with Brand63:",
+        "The Brand63 Authority": "Why Shop with Brand63",
+        "Brand63 Authority:": "Why Shop with Brand63:",
+        "Brand63 Authority": "Why Shop with Brand63",
+        "Authority Section": "Why Shop with Brand63",
+        "SEO": "style",
+        "Search Engine": "shopper",
+        "keyword": "style idea",
+        "Keyword": "Style Idea"
+    }
+
+    for bad, good in replacements.items():
+        html = html.replace(bad, good)
+
+    return html
+
+def add_missing_link_attributes(html):
+    def fix_link(match):
+        full_tag = match.group(0)
+
+        if "target=" not in full_tag:
+            full_tag = full_tag.replace("<a ", '<a target="_blank" ')
+        if "rel=" not in full_tag:
+            full_tag = full_tag.replace("<a ", '<a rel="noopener noreferrer" ')
+        if "title=" not in full_tag:
+            title = safe_link_title("Shop Brand63 products and collections")
+            full_tag = full_tag.replace("<a ", f'<a title="{title}" ')
+
+        return full_tag
+
+    return re.sub(r'<a\s+[^>]*href="([^"]+)"[^>]*>', fix_link, html)
+
 # ===== HTML BUILDERS =====
 def build_image_html(p, primary_keyword):
     alt = f"{primary_keyword} - {p['title']} by Brand63"
@@ -255,31 +292,12 @@ def build_product_section(products, primary_keyword):
 </section>
 """.strip()
 
-def build_authority_block():
+def build_brand63_block():
     return """
 <hr/>
-<h2>Why Shop Brand63?</h2>
-<p>Brand63 is an online destination for affordable apparel, gifts, drinkware, lifestyle products, printables, and urban fashion inspiration. Our goal is to help shoppers find expressive products that feel personal, stylish, and budget-friendly.</p>
+<h2>Why Shop with Brand63?</h2>
+<p>Brand63 offers affordable apparel, gifts, drinkware, lifestyle products, printables, and urban fashion finds for shoppers who want personality, comfort, and style without overspending.</p>
 """.strip()
-
-def add_missing_link_attributes(html):
-    # Adds target, rel, and title to links if AI forgot.
-    def fix_link(match):
-        full_tag = match.group(0)
-        href = match.group(1)
-
-        if "target=" not in full_tag:
-            full_tag = full_tag.replace("<a ", '<a target="_blank" ')
-        if "rel=" not in full_tag:
-            full_tag = full_tag.replace("<a ", '<a rel="noopener noreferrer" ')
-        if "title=" not in full_tag:
-            title = safe_link_title("Shop Brand63 products and collections")
-            full_tag = full_tag.replace("<a ", f'<a title="{title}" ')
-
-        return full_tag
-
-    html = re.sub(r'<a\s+[^>]*href="([^"]+)"[^>]*>', fix_link, html)
-    return html
 
 # ===== AI GENERATION =====
 def openai_generate(keyword, collection_title, collection_url, products):
@@ -291,12 +309,12 @@ def openai_generate(keyword, collection_title, collection_url, products):
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = f"""
-You are an expert SEO strategist and ecommerce copywriter for Brand63.com.
+You are writing a customer-facing blog post for Brand63.com.
 
-Primary keyword phrase:
+Primary shopper search phrase:
 {keyword}
 
-Related Shopify collection:
+Related Brand63 collection:
 {collection_title}
 
 Collection URL:
@@ -305,16 +323,16 @@ Collection URL:
 Products from this collection:
 {product_list_text}
 
-Write a high-quality ecommerce blog post designed to attract search engine traffic and help shoppers discover Brand63 products.
+Write a helpful, natural, customer-facing ecommerce blog post designed to help shoppers discover Brand63 products.
 
-Important:
-- Do NOT use "Fresh Drops and New Arrivals" as the title.
-- The title must start with or clearly include the primary keyword.
-- Use related keyword phrases naturally.
-- Make Brand63 sound trustworthy, helpful, affordable, and style-focused.
+Critical rules:
+- Do NOT use the phrase "Fresh Drops and New Arrivals."
+- Do NOT use the phrases "buyer intent", "Brand63 authority", "authority section", "SEO", "keyword", "search engine", or "marketing strategy" anywhere in the article.
+- Do NOT expose back-office strategy.
+- The article should sound like a real Brand63 shopping guide, not a marketing report.
+- The title must clearly include the primary shopper search phrase.
 - Focus only on this collection and these products.
 - Do not mention unrelated products.
-- Use internal links only.
 - Use https://www.brand63.com links only.
 - All links must include target="_blank", rel="noopener noreferrer", and a descriptive title attribute.
 - Link to the collection URL once.
@@ -322,8 +340,8 @@ Important:
 - Write 1000 to 1400 words.
 - Use HTML inside the html field only.
 - Use <h2>, <h3>, <p>, <ul>, and <li>.
-- Include a buyer-intent section.
-- Include a Brand63 authority section.
+- Include a helpful shopping guidance section with a natural heading such as "How to Choose the Right Find" or "Why Shoppers Love These Picks."
+- Include a trust-building Brand63 section with a natural heading such as "Why Shop with Brand63?"
 - Include 4 FAQs.
 - End with a strong shop-now call to action.
 
@@ -398,13 +416,11 @@ Tags:
         raise RuntimeError("AI did not generate blog content.")
 
     html = html.replace("brand63.myshopify.com", "www.brand63.com")
+    html = remove_bad_marketing_language(html)
     html = add_missing_link_attributes(html)
 
     if "fresh drops and new arrivals" in title.lower():
-        title = f"{keyword}: Brand63 Style Guide"
-
-    if not title.lower().startswith(keyword.lower().split()[0]):
-        title = f"{keyword}: Brand63 Style Guide"
+        title = f"{keyword}: Brand63 Shopping Guide"
 
     if not excerpt:
         excerpt = clean_text(f"Shop {keyword} styles, gifts, and finds from Brand63.", 140)
@@ -452,7 +468,7 @@ def clean_tags(tags, keyword, collection_title):
 
     return ", ".join(cleaned[:6])
 
-# ===== META DESCRIPTION =====
+# ===== SEO METAFIELDS =====
 def add_seo_metafields(blog_id, article_id, meta_description, title):
     meta_description = clean_text(meta_description, 155)
     title = clean_text(title, 70)
@@ -533,8 +549,8 @@ def main():
         picks
     )
 
-    authority_block = build_authority_block()
     product_section = build_product_section(picks, primary_keyword)
+    brand63_block = build_brand63_block()
 
     collection_title_attr = safe_link_title(f"Shop the {collection_title} collection at Brand63")
 
@@ -548,13 +564,14 @@ Brand63 {collection_title} collection
     combined_html = f"""
 {html}
 {collection_link}
-{authority_block}
+{brand63_block}
 {product_section}
 <hr/>
 {KLAVIYO_EMBED}
 """
 
     combined_html = combined_html.replace("brand63.myshopify.com", "www.brand63.com")
+    combined_html = remove_bad_marketing_language(combined_html)
     combined_html = add_missing_link_attributes(combined_html)
 
     cleaned_tags = clean_tags(tags, keyword, collection_title)
