@@ -1,4 +1,5 @@
 import os, json, random, re, requests
+from datetime import datetime
 from openai import OpenAI
 
 # ===== CONFIG =====
@@ -17,6 +18,59 @@ SESSION.headers.update({
     "Content-Type": "application/json",
     "Accept": "application/json"
 })
+
+# ===== SEASONAL SEO FOCUS =====
+def get_current_season_keywords():
+    month = datetime.utcnow().month
+
+    if month in [1, 2]:
+        return [
+            "winter fashion", "new year style", "valentine gifts", "hoodies",
+            "coffee mugs", "faith-based gifts", "urbanwear", "streetwear"
+        ]
+
+    if month in [3, 4]:
+        return [
+            "spring fashion", "easter gifts", "faith-based apparel", "spring outfits",
+            "t-shirts", "tote bags", "printables", "instant downloads"
+        ]
+
+    if month in [5, 6]:
+        return [
+            "summer fashion", "fathers day gifts", "best gifts for dads",
+            "athletes only", "mens urban style", "t-shirts", "coffee mugs",
+            "boys clothing and gifts", "girls apparel and gifts", "summer outfits",
+            "streetwear", "urban fashion", "t-shirts under 10"
+        ]
+
+    if month in [7, 8]:
+        return [
+            "back to school", "summer style", "kids apparel", "boys clothing",
+            "girls apparel", "streetwear", "anime t-shirts", "urbanwear",
+            "t-shirts", "tote bags"
+        ]
+
+    if month == 9:
+        return [
+            "fall fashion", "streetwear", "hoodie styling", "urbanwear",
+            "mens urban style", "womens urban style", "coffee mugs", "tote bags"
+        ]
+
+    if month == 10:
+        return [
+            "halloween", "fall fashion", "graphic tees", "streetwear",
+            "urban fashion", "coffee mugs", "tote bags"
+        ]
+
+    if month in [11, 12]:
+        return [
+            "holiday gifts", "christmas gifts", "black friday", "cyber monday",
+            "coffee mugs", "faith-based gifts", "gifts for dads", "tote bags",
+            "winter fashion", "hoodies", "streetwear"
+        ]
+
+    return ["streetwear", "urban fashion", "coffee mugs", "t-shirts"]
+
 
 # ===== SHOPIFY HELPERS =====
 def shopify_get(path, params=None):
@@ -40,13 +94,23 @@ def clean_text(value, max_len=300):
 def get_blog_id_by_handle(handle):
     data = shopify_get("blogs.json")
     blogs = data.get("blogs", [])
+
     for b in blogs:
         if b.get("handle") == handle:
             return b.get("id")
+
     if blogs:
         return blogs[0].get("id")
-    created = shopify_post("blogs.json", {"blog": {"title": handle.capitalize(), "handle": handle}})
+
+    created = shopify_post("blogs.json", {
+        "blog": {
+            "title": handle.capitalize(),
+            "handle": handle
+        }
+    })
+
     return created["blog"]["id"]
+
 
 # ===== COLLECTIONS =====
 def get_all_collections(limit=250):
@@ -73,7 +137,11 @@ def get_all_collections(limit=250):
     return collections
 
 def get_products_from_collection(collection_id, limit=20):
-    data = shopify_get(f"collections/{collection_id}/products.json", params={"limit": limit})
+    data = shopify_get(
+        f"collections/{collection_id}/products.json",
+        params={"limit": limit}
+    )
+
     products = []
 
     for p in data.get("products", []):
@@ -95,27 +163,77 @@ def get_products_from_collection(collection_id, limit=20):
 
     return products
 
+
+# ===== SMART COLLECTION PICKER =====
+def collection_matches_season(collection, season_keywords):
+    title = collection.get("title", "").lower()
+    handle = collection.get("handle", "").lower()
+    combined = f"{title} {handle}"
+
+    return any(keyword.lower() in combined for keyword in season_keywords)
+
+def avoid_bad_seasonal_collection(collection):
+    month = datetime.utcnow().month
+    title = collection.get("title", "").lower()
+    handle = collection.get("handle", "").lower()
+    combined = f"{title} {handle}"
+
+    blocked_now = []
+
+    if month in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
+        blocked_now.extend(["christmas", "holiday", "xmas", "winter"])
+
+    if month not in [9, 10]:
+        blocked_now.extend(["halloween", "trick-or-treat"])
+
+    if month not in [5, 6]:
+        blocked_now.extend(["fathers day", "father's day"])
+
+    if month not in [2, 3, 4]:
+        blocked_now.extend(["easter"])
+
+    return any(word in combined for word in blocked_now)
+
 def pick_topic_and_products():
     collections = get_all_collections()
 
     if not collections:
         raise RuntimeError("No Shopify collections found.")
 
-    random.shuffle(collections)
+    season_keywords = get_current_season_keywords()
 
-    for chosen in collections:
+    good_collections = [
+        c for c in collections
+        if collection_matches_season(c, season_keywords)
+        and not avoid_bad_seasonal_collection(c)
+    ]
+
+    if not good_collections:
+        good_collections = [
+            c for c in collections
+            if not avoid_bad_seasonal_collection(c)
+        ]
+
+    if not good_collections:
+        good_collections = collections
+
+    random.shuffle(good_collections)
+
+    for chosen in good_collections:
         products = get_products_from_collection(chosen["id"], limit=20)
 
         if len(products) >= 1:
             picks = random.sample(products, k=min(3, len(products)))
             collection_url = f"https://{STORE.replace('.myshopify.com','')}.myshopify.com/collections/{chosen['handle']}"
-            return chosen["title"], chosen["handle"], collection_url, picks
+            return chosen["title"], chosen["handle"], collection_url, picks, season_keywords
 
     raise RuntimeError("No collections with products and images were found.")
 
-# ===== IMAGE / PRODUCT HTML =====
+
+# ===== PRODUCT HTML =====
 def build_image_html(p, primary_keyword):
     alt = f"{primary_keyword} - {p['title']} by {AUTHOR_NAME}"
+
     return f"""
 <figure>
   <a href="{p['url']}" target="_self" rel="noopener">
@@ -127,6 +245,7 @@ def build_image_html(p, primary_keyword):
 
 def build_product_section(products, primary_keyword):
     blocks = "\n".join(build_image_html(p, primary_keyword) for p in products)
+
     return f"""
 <hr/>
 <h2>Shop Featured Brand63 Picks</h2>
@@ -135,17 +254,22 @@ def build_product_section(products, primary_keyword):
 </section>
 """.strip()
 
+
 # ===== AI BLOG GENERATION =====
-def openai_generate(collection_title, collection_url, products):
+def openai_generate(collection_title, collection_url, products, season_keywords):
     product_list_text = "\n".join([
         f"- {p['title']} ({p['url']}) | Tags: {p.get('tags','')}"
         for p in products
     ])
 
+    seasonal_focus = ", ".join(season_keywords)
+
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = f"""
 You are an expert SEO strategist, ecommerce copywriter, and content marketer for Brand63.com.
+
+Brand63 is an ecommerce store focused on affordable apparel, expressive streetwear, gifts, lifestyle products, printables, mugs, bags, and personality-driven style.
 
 Main collection:
 {collection_title}
@@ -153,28 +277,31 @@ Main collection:
 Collection URL:
 {collection_url}
 
+Current seasonal SEO focus:
+{seasonal_focus}
+
 Products from this exact collection:
 {product_list_text}
 
-Your goal:
-Create a high-quality ecommerce blog post that can help Brand63 build search engine authority, attract interested shoppers, and guide readers toward the collection and products.
+Your job:
+Create a strong SEO blog post that can help Brand63 build search authority, attract shoppers, and guide people to the collection and featured products.
 
-Important rules:
-- Do NOT use the repeated title "Fresh Drops and New Arrivals."
-- Create a unique SEO title based on the collection and shopper search intent.
-- The blog must clearly match the collection and the products listed.
-- Do not mention unrelated product types.
-- Use natural keyword phrases shoppers may search for.
-- Sound human, helpful, and confident.
-- Make Brand63 sound like a trustworthy ecommerce brand for apparel, gifts, lifestyle products, and expressive style.
+Critical rules:
+- Do NOT use the title or heading "Fresh Drops and New Arrivals."
+- Do NOT make the title generic.
+- Do NOT mention unrelated product categories.
+- The blog must match the collection and featured products.
+- Use real shopper-style keyword phrases.
+- Make Brand63 sound like a trusted ecommerce brand.
 - Use internal links only.
-- Include a link to the collection URL at least once.
+- Include the collection URL naturally at least once.
 - Include product links naturally.
 - Write 1000 to 1400 words.
 - Use HTML only inside the "html" field.
 - Use <h2>, <h3>, <p>, <ul>, and <li>.
+- Include a section explaining who this collection is best for.
+- Include a section with buyer-intent language.
 - Include a Brand63 authority section.
-- Include a buyer-intent section.
 - Include a strong call to action.
 - Include 4 FAQ questions and answers inside the article.
 
@@ -187,10 +314,16 @@ meta_description
 primary_keyword
 secondary_keywords
 
+Title rules:
+- SEO-friendly.
+- Clear and specific.
+- 55 to 70 characters if possible.
+- Must not say Fresh Drops or New Arrivals.
+
 Tag rules:
 - tags should be comma-separated.
 - Give 4 to 6 tags only.
-- Do NOT add the word blog to tags. The code will do that later.
+- Do NOT add the word blog. The code will add it.
 
 Excerpt rules:
 - excerpt must be 1 to 2 short sentences.
@@ -203,8 +336,14 @@ Meta description rules:
     resp = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
-            {"role": "system", "content": "Return only valid JSON. No markdown. No explanation."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "Return only valid JSON. No markdown. No explanation."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
         ],
         response_format={
             "type": "json_schema",
@@ -245,6 +384,16 @@ Meta description rules:
     meta_description = clean_text(obj.get("meta_description"), 160)
     primary_keyword = clean_text(obj.get("primary_keyword"), 100)
 
+    bad_titles = [
+        "fresh drops",
+        "new arrivals",
+        "latest arrivals",
+        "collection spotlight"
+    ]
+
+    if any(bad in title.lower() for bad in bad_titles):
+        title = f"Best {collection_title} Picks from Brand63"
+
     if not excerpt:
         excerpt = clean_text(html, 250)
 
@@ -254,13 +403,11 @@ Meta description rules:
     if not primary_keyword:
         primary_keyword = collection_title
 
-    if "Fresh Drops and New Arrivals".lower() in title.lower():
-        title = f"Best {collection_title} Picks from Brand63"
-
     if not html:
         raise RuntimeError("AI did not generate blog content.")
 
     return title, html, tags, excerpt, meta_description, primary_keyword
+
 
 # ===== TAG CLEANER =====
 def clean_tags(tags, collection_title):
@@ -272,6 +419,7 @@ def clean_tags(tags, collection_title):
     raw_tags.append(collection_title)
 
     cleaned = []
+
     for tag in raw_tags:
         tag = tag.strip()
         tag = tag.replace("#", "").replace("|", "").replace("/", " ")
@@ -287,6 +435,7 @@ def clean_tags(tags, collection_title):
             cleaned.append(tag)
 
     return ", ".join(cleaned[:6])
+
 
 # ===== PUBLISH BLOG =====
 def publish_article(blog_id, title, body_html, tags, excerpt, featured_image_src=None, featured_image_alt=None):
@@ -314,6 +463,7 @@ def publish_article(blog_id, title, body_html, tags, excerpt, featured_image_src
 
     return shopify_post(f"blogs/{blog_id}/articles.json", article)
 
+
 # ===== MAIN =====
 def main():
     if not STORE or not TOKEN or not OPENAI_API_KEY:
@@ -321,12 +471,13 @@ def main():
 
     blog_id = get_blog_id_by_handle(BLOG_HANDLE)
 
-    collection_title, collection_handle, collection_url, picks = pick_topic_and_products()
+    collection_title, collection_handle, collection_url, picks, season_keywords = pick_topic_and_products()
 
     title, html, tags, excerpt, meta_description, primary_keyword = openai_generate(
         collection_title,
         collection_url,
-        picks
+        picks,
+        season_keywords
     )
 
     product_section = build_product_section(picks, primary_keyword)
@@ -363,4 +514,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
