@@ -8,7 +8,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 API_VERSION = "2023-10"
 AUTHOR_NAME = "Brand63"
 BLOG_HANDLE = "trendsetter-news"
-AUTO_PUBLISH = False  # Hidden draft until you approve
+AUTO_PUBLISH = False
+
+PUBLIC_DOMAIN = "https://www.brand63.com"
+KLAVIYO_EMBED = '<div class="klaviyo-form-SWqvMf"></div>'
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -18,43 +21,26 @@ SESSION.headers.update({
 })
 
 HIGH_PRIORITY_KEYWORDS = [
-    "Best Gifts For Dads",
-    "Coffee Mugs",
-    "Anime T-Shirts",
-    "Women's Urban Style",
-    "Men's Urban Style",
-    "Urban Fashion Trends",
-    "Streetwear Gift Guide",
-    "T-shirts Under $10",
-    "Best Totes and Bags",
-    "Faith-Based Apparel and Gifts",
-    "Boys Clothing and Gifts",
-    "Top Girl's Apparel and Gifts",
-    "Infant and Toddler Apparel and Gifts",
+    "Best Gifts For Dads", "Coffee Mugs", "Anime T-Shirts",
+    "Women's Urban Style", "Men's Urban Style", "Urban Fashion Trends",
+    "Streetwear Gift Guide", "T-shirts Under $10", "Best Totes and Bags",
+    "Faith-Based Apparel and Gifts", "Boys Clothing and Gifts",
+    "Top Girl's Apparel and Gifts", "Infant and Toddler Apparel and Gifts",
     "The Black Girl Mug Collection"
 ]
 
 MEDIUM_PRIORITY_KEYWORDS = [
-    "Athletes Only",
-    "Design Your Own Apparel",
-    "Top New Arrivals",
-    "Fashion Trends",
-    "Clearance Sale",
-    "Instant Downloads",
-    "Printables",
-    "Head Gear"
+    "Athletes Only", "Design Your Own Apparel", "Top New Arrivals",
+    "Fashion Trends", "Clearance Sale", "Instant Downloads",
+    "Printables", "Head Gear"
 ]
 
 LOW_PRIORITY_KEYWORDS = [
-    "OOTD",
-    "NJ WEAR 2008",
-    "Fresh Friday For Men",
-    "Tuesday Fashion Fix",
-    "Fashion Sale",
-    "BTS Merch Sale"
+    "OOTD", "NJ WEAR 2008", "Fresh Friday For Men",
+    "Tuesday Fashion Fix", "Fashion Sale", "BTS Merch Sale"
 ]
 
-# ===== BASIC HELPERS =====
+# ===== HELPERS =====
 def clean_text(value, max_len=300):
     value = value or ""
     value = re.sub(r"<[^>]+>", " ", value)
@@ -80,15 +66,22 @@ def shopify_post(path, payload):
     r.raise_for_status()
     return r.json()
 
+def product_public_url(handle):
+    return f"{PUBLIC_DOMAIN}/products/{handle}"
+
+def collection_public_url(handle):
+    return f"{PUBLIC_DOMAIN}/collections/{handle}"
+
+def safe_link_title(text):
+    return clean_text(text.replace('"', "'"), 120)
+
 # ===== KEYWORDS =====
 def load_keywords():
-    keywords = []
-
     try:
         with open("keywords.csv", "r", encoding="utf-8") as f:
             keywords = [line.strip() for line in f if line.strip()]
     except FileNotFoundError:
-        pass
+        keywords = []
 
     if not keywords:
         keywords = HIGH_PRIORITY_KEYWORDS + MEDIUM_PRIORITY_KEYWORDS + LOW_PRIORITY_KEYWORDS
@@ -177,10 +170,7 @@ def choose_collection_for_keyword(keyword):
     if not collections:
         raise RuntimeError("No Shopify collections found.")
 
-    scored = []
-    for c in collections:
-        scored.append((score_collection(keyword, c), c))
-
+    scored = [(score_collection(keyword, c), c) for c in collections]
     scored.sort(key=lambda x: x[0], reverse=True)
 
     best_score, best_collection = scored[0]
@@ -205,7 +195,7 @@ def get_products_from_collection(collection_id, limit=20):
             "id": p["id"],
             "title": p["title"],
             "handle": p["handle"],
-            "url": f"https://{STORE.replace('.myshopify.com','')}.myshopify.com/products/{p['handle']}",
+            "url": product_public_url(p["handle"]),
             "image": first_img,
             "tags": p.get("tags", ""),
             "body_html": p.get("body_html", "")
@@ -232,21 +222,25 @@ def pick_topic_and_products():
         raise RuntimeError("No collection products with images found.")
 
     picks = random.sample(products, k=min(3, len(products)))
-
-    collection_url = f"https://{STORE.replace('.myshopify.com','')}.myshopify.com/collections/{collection['handle']}"
+    collection_url = collection_public_url(collection["handle"])
 
     return keyword, collection["title"], collection["handle"], collection_url, picks
 
 # ===== HTML BUILDERS =====
 def build_image_html(p, primary_keyword):
     alt = f"{primary_keyword} - {p['title']} by Brand63"
+    link_title = safe_link_title(f"Shop {p['title']} at Brand63")
 
     return f"""
 <figure>
-  <a href="{p['url']}" target="_self" rel="noopener">
+  <a href="{p['url']}" target="_blank" rel="noopener noreferrer" title="{link_title}">
     <img src="{p['image']}" alt="{alt}" loading="lazy" />
   </a>
-  <figcaption><a href="{p['url']}" target="_self">Shop {p['title']}</a></figcaption>
+  <figcaption>
+    <a href="{p['url']}" target="_blank" rel="noopener noreferrer" title="{link_title}">
+      Shop {p['title']}
+    </a>
+  </figcaption>
 </figure>
 """.strip()
 
@@ -267,6 +261,25 @@ def build_authority_block():
 <h2>Why Shop Brand63?</h2>
 <p>Brand63 is an online destination for affordable apparel, gifts, drinkware, lifestyle products, printables, and urban fashion inspiration. Our goal is to help shoppers find expressive products that feel personal, stylish, and budget-friendly.</p>
 """.strip()
+
+def add_missing_link_attributes(html):
+    # Adds target, rel, and title to links if AI forgot.
+    def fix_link(match):
+        full_tag = match.group(0)
+        href = match.group(1)
+
+        if "target=" not in full_tag:
+            full_tag = full_tag.replace("<a ", '<a target="_blank" ')
+        if "rel=" not in full_tag:
+            full_tag = full_tag.replace("<a ", '<a rel="noopener noreferrer" ')
+        if "title=" not in full_tag:
+            title = safe_link_title("Shop Brand63 products and collections")
+            full_tag = full_tag.replace("<a ", f'<a title="{title}" ')
+
+        return full_tag
+
+    html = re.sub(r'<a\s+[^>]*href="([^"]+)"[^>]*>', fix_link, html)
+    return html
 
 # ===== AI GENERATION =====
 def openai_generate(keyword, collection_title, collection_url, products):
@@ -302,6 +315,8 @@ Important:
 - Focus only on this collection and these products.
 - Do not mention unrelated products.
 - Use internal links only.
+- Use https://www.brand63.com links only.
+- All links must include target="_blank", rel="noopener noreferrer", and a descriptive title attribute.
 - Link to the collection URL once.
 - Link to each product naturally.
 - Write 1000 to 1400 words.
@@ -382,6 +397,9 @@ Tags:
     if not html:
         raise RuntimeError("AI did not generate blog content.")
 
+    html = html.replace("brand63.myshopify.com", "www.brand63.com")
+    html = add_missing_link_attributes(html)
+
     if "fresh drops and new arrivals" in title.lower():
         title = f"{keyword}: Brand63 Style Guide"
 
@@ -391,13 +409,15 @@ Tags:
     if not excerpt:
         excerpt = clean_text(f"Shop {keyword} styles, gifts, and finds from Brand63.", 140)
 
-    # Force short excerpt
     excerpt_words = excerpt.split()
     if len(excerpt_words) > 20:
         excerpt = " ".join(excerpt_words[:20]) + "."
 
     if not meta_description:
-        meta_description = clean_text(f"Discover {keyword} ideas, apparel, gifts, and lifestyle finds from Brand63. Shop affordable styles today.", 155)
+        meta_description = clean_text(
+            f"Discover {keyword} ideas, apparel, gifts, and lifestyle finds from Brand63. Shop affordable styles today.",
+            155
+        )
 
     if not primary_keyword:
         primary_keyword = keyword
@@ -516,8 +536,13 @@ def main():
     authority_block = build_authority_block()
     product_section = build_product_section(picks, primary_keyword)
 
+    collection_title_attr = safe_link_title(f"Shop the {collection_title} collection at Brand63")
+
     collection_link = f"""
-<p><strong>Explore more:</strong> Browse the full <a href="{collection_url}" target="_self">Brand63 {collection_title} collection</a>.</p>
+<p><strong>Explore more:</strong> Browse the full
+<a href="{collection_url}" target="_blank" rel="noopener noreferrer" title="{collection_title_attr}">
+Brand63 {collection_title} collection
+</a>.</p>
 """
 
     combined_html = f"""
@@ -525,7 +550,12 @@ def main():
 {collection_link}
 {authority_block}
 {product_section}
+<hr/>
+{KLAVIYO_EMBED}
 """
+
+    combined_html = combined_html.replace("brand63.myshopify.com", "www.brand63.com")
+    combined_html = add_missing_link_attributes(combined_html)
 
     cleaned_tags = clean_tags(tags, keyword, collection_title)
 
